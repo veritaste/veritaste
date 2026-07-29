@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Veritaste — Harvard dining, measured</title>
+<meta name="description" content="Student course project: dining hall menus, ratings, line times and food-waste signals.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Montserrat:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div class="simbar" id="simbar">
+  Harvard Summer School &middot; ENSC S-106 project
+</div>
+
+<div class="idbar">
+  <div class="idbar__in">
+    <div class="mark">
+
+      <svg width="30" height="30" viewBox="0 0 40 40" role="img" aria-label="Veritaste">
+        <circle cx="20" cy="20" r="19" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M20 30 V17" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M20 18 C20 12, 15 10, 12.5 9.5 C12.5 14, 16 17.5, 20 18 Z" fill="currentColor"/>
+        <path d="M20 18 C20 12, 25 10, 27.5 9.5 C27.5 14, 24 17.5, 20 18 Z"
+              fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      </svg>
+      <div class="wordmark">Veri<span>taste</span></div>
+    </div>
+    <div class="idbar__spacer"></div>
+    <div class="idbar__who" id="who">
+      <button class="linkbtn" id="signinBtn">Sign in</button>
+    </div>
+  </div>
+</div>
+
+<nav class="top">
+  <ul>
+    <li><a href="#" aria-current="page">Menu</a></li>
+    <li><a href="#lines">Line times</a></li>
+    <li><a href="#where">Where can I eat?</a></li>
+  </ul>
+</nav>
+
+<main class="wrap">
+
+  <div class="controls">
+    <div class="field">
+      <label for="hall">Dining hall</label>
+      <select id="hall"><option>Loading…</option></select>
+    </div>
+    <div class="field">
+      <label for="date">Date</label>
+      <input type="date" id="date">
+    </div>
+
+    <div class="seg" id="mealSeg" role="group" aria-label="Meal" hidden></div>
+  </div>
+
+  <div id="hint" class="note" style="margin-bottom:20px; display:none"></div>
+  <div id="staleNote" class="note" style="margin-bottom:20px; display:none"></div>
+
+  <section class="card rsvp" id="tonight">
+    <div class="rsvp__copy">
+      <h2 id="rsvpQ">Eating here tonight?</h2>
+      <p>Telling the kitchen you're <em>not</em> coming is the useful part — it
+         helps them learn demand is light before the food is cooked.</p>
+    </div>
+
+    <div class="rsvp__act">
+      <button class="btn ghost" id="yesBtn" aria-pressed="false">I'll be there</button>
+      <button class="btn ghost" id="noBtn" aria-pressed="false">Not this meal</button>
+    </div>
+  </section>
+
+  <div class="cols">
+    <section class="card">
+      <div class="card__hd">
+        <h2>Menu</h2>
+        <span class="idbar__spacer"></span>
+        <span id="count" class="ui" style="font-size:12px;color:var(--ink-mute)"></span>
+      </div>
+      <div class="card__bd" id="menu">
+        <div class="state"><div class="spin"></div>Loading menu…</div>
+      </div>
+    </section>
+
+    <aside style="display:grid; gap:22px">
+
+      <div class="card" id="lines">
+        <div class="card__hd">
+          <h2>Line right now</h2><span class="sim" id="lineSim">simulated</span>
+        </div>
+        <div class="card__bd">
+          <div class="gauge__now" id="waitNow">—</div>
+          <div class="gauge__sub" id="waitSub"></div>
+
+          <div id="lineDetail">
+            <div class="gauge" id="gauge"></div>
+          </div>
+          <div id="lineTypical">
+            <div class="sec" style="margin-top:18px">
+              <h4>Typical for this weekday</h4>
+              <div class="spark" id="spark"></div>
+              <div class="spark__ax"><span>7a</span><span>12p</span><span>5p</span><span>9p</span></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card" id="where">
+        <div class="card__hd"><h2 id="whereTitle">Where can I eat?</h2></div>
+        <div class="card__bd" id="interhouse">
+          <div class="state" style="padding:20px 0">Loading house rules…</div>
+        </div>
+      </div>
+
+    </aside>
+  </div>
+</main>
+
+<footer><div class="wrap">
+  This is not affiliated with or endorsed by Harvard University or HUDS.
+</div></footer>
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="shTitle">
+  <div class="sheet__hd">
+    <h3 id="shTitle">—</h3>
+    <button class="sheet__x" id="shClose" aria-label="Close">&times;</button>
+  </div>
+  <div class="sheet__bd" id="shBody"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

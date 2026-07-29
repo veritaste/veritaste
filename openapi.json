@@ -1,0 +1,707 @@
+{
+  "components": {
+    "schemas": {
+      "AttendanceIn": {
+        "additionalProperties": false,
+        "properties": {
+          "attending": {
+            "type": "boolean"
+          },
+          "location_id": {
+            "type": "integer"
+          },
+          "meal": {
+            "default": 2,
+            "maximum": 2,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "served_on": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "attending",
+          "location_id"
+        ],
+        "type": "object"
+      },
+      "HTTPError": {
+        "properties": {
+          "detail": {
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RatingIn": {
+        "additionalProperties": false,
+        "properties": {
+          "comment": {
+            "default": null,
+            "maxLength": 1000,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location_id": {
+            "default": null,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "recipe_id": {
+            "type": "integer"
+          },
+          "score": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "served_on": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "recipe_id",
+          "score"
+        ],
+        "type": "object"
+      },
+      "SignInIn": {
+        "additionalProperties": false,
+        "properties": {
+          "netid": {
+            "enum": [
+              "ajw1042",
+              "rkc2287",
+              "mlp3319",
+              "dso4471",
+              "hks5508"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "netid"
+        ],
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "detail": {
+            "properties": {
+              "<location>": {
+                "properties": {
+                  "<field_name>": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "This is not affiliated with or endorsed by Harvard University or HUDS.",
+    "title": "Veritaste API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/attendance": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "meal",
+            "required": false,
+            "schema": {
+              "default": 2,
+              "maximum": 2,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Declared attendance counts for a service",
+        "tags": [
+          "signals"
+        ]
+      },
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttendanceIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Declare whether you are coming (requires sign-in)",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/v1/auth/accounts": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Selectable demonstration identities",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/demo-signin": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Complete the mock authorization-code exchange",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/signout": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Clear the session",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/houses": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Houses and the servery each uses",
+        "tags": [
+          "reference"
+        ]
+      }
+    },
+    "/api/v1/interhouse": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "meal",
+            "required": false,
+            "schema": {
+              "default": 2,
+              "maximum": 2,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "house",
+            "required": false,
+            "schema": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Where this student may eat, by meal and date",
+        "tags": [
+          "reference"
+        ]
+      }
+    },
+    "/api/v1/line/{location_id}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "location_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "summary": "Current servery busyness (simulated)",
+        "tags": [
+          "signals"
+        ]
+      }
+    },
+    "/api/v1/line/{location_id}/typical": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "location_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Historical busyness by time of day",
+        "tags": [
+          "signals"
+        ]
+      }
+    },
+    "/api/v1/locations": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "HUDS dining locations",
+        "tags": [
+          "dining"
+        ]
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Current session, if any",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/menu": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "meal",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 2,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Menu for a hall, date and meal, with Veritaste signals",
+        "tags": [
+          "dining"
+        ]
+      }
+    },
+    "/api/v1/meta": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Build and configuration summary",
+        "tags": [
+          "platform"
+        ]
+      }
+    },
+    "/api/v1/ratings": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RatingIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Rate a dish (requires sign-in)",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/v1/recipes/{recipe_id}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recipe_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "summary": "One dish \u2014 the QR/NFC scan target, no login",
+        "tags": [
+          "dining"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Liveness check (EKS ingress convention)",
+        "tags": [
+          "platform"
+        ]
+      }
+    },
+    "/monitor/health": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Liveness check (ECS/Apigee convention)",
+        "tags": [
+          "platform"
+        ]
+      }
+    }
+  },
+  "tags": []
+}
