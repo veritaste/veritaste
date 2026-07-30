@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from ..config import DB_PATH, STORE_BACKEND
-from .base import CachedBlob, ConsumptionSignal, RatingSummary, Store
+from .base import (CachedBlob, ConsumptionSignal, PushSub, RatingSummary,
+                   RewardGrant, RewardSummary, Store)
 from .sqlite_store import SqliteStore
 
 __all__ = [
@@ -9,6 +10,9 @@ __all__ = [
     "CachedBlob",
     "RatingSummary",
     "ConsumptionSignal",
+    "RewardGrant",
+    "RewardSummary",
+    "PushSub",
     "build_store",
 ]
 

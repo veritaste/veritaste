@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+TIMEZONE = os.environ.get("VERITASTE_TIMEZONE", "America/New_York")
+try:
+    LOCAL_TZ = ZoneInfo(TIMEZONE)
+except ZoneInfoNotFoundError as exc:
+    raise ValueError(
+        f"VERITASTE_TIMEZONE={TIMEZONE!r} could not be resolved. Check the name "
+        "against the IANA database, and note that Windows needs the `tzdata` package."
+    ) from exc
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = SERVER_DIR.parent
@@ -26,5 +36,19 @@ UPSTREAM_TIMEOUT_S = _env_int("VERITASTE_UPSTREAM_TIMEOUT", 20)
 UPSTREAM_CONCURRENCY = _env_int("VERITASTE_UPSTREAM_CONCURRENCY", 6)
 
 WEB_DIR = Path(os.environ.get("VERITASTE_WEB", PROJECT_DIR / "web"))
+
+MODE = os.environ.get("VERITASTE_MODE", "production").strip().lower()
+if MODE not in ("production", "demo"):
+    raise ValueError(
+        f'VERITASTE_MODE={MODE!r} is not recognised. Use "production" or "demo".'
+    )
+
+DEMO_MODE = MODE == "demo"
+
+RATING_RECENT_DAYS = _env_int("VERITASTE_RATING_RECENT_DAYS", 30)
+
+VAPID_PUBLIC = os.environ.get("VERITASTE_VAPID_PUBLIC", "")
+VAPID_PRIVATE = os.environ.get("VERITASTE_VAPID_PRIVATE", "")
+VAPID_SUB = os.environ.get("VERITASTE_VAPID_SUB", "https://veritaste.org")
 
 ECS_APIKEY = os.environ.get("ECS_APIKEY", "")

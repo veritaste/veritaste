@@ -41,6 +41,29 @@
         },
         "type": "object"
       },
+      "PushSubIn": {
+        "additionalProperties": false,
+        "properties": {
+          "auth": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "endpoint": {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          "p256dh": {
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "required": [
+          "auth",
+          "endpoint",
+          "p256dh"
+        ],
+        "type": "object"
+      },
       "RatingIn": {
         "additionalProperties": false,
         "properties": {
@@ -53,11 +76,7 @@
             ]
           },
           "location_id": {
-            "default": null,
-            "type": [
-              "integer",
-              "null"
-            ]
+            "type": "integer"
           },
           "recipe_id": {
             "type": "integer"
@@ -76,6 +95,7 @@
           }
         },
         "required": [
+          "location_id",
           "recipe_id",
           "score"
         ],
@@ -588,6 +608,119 @@
         ]
       }
     },
+    "/api/v1/push/subscriptions": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "endpoint",
+            "required": true,
+            "schema": {
+              "maxLength": 1000,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Unsubscribe this browser",
+        "tags": [
+          "notifications"
+        ]
+      },
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushSubIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Register this browser for notifications",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/push/test": {
+      "post": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Send this account's own subscriptions a preview notification",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/push/vapid": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Application server key for subscribing",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
     "/api/v1/ratings": {
       "post": {
         "parameters": [],
@@ -636,6 +769,16 @@
             "schema": {
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "location",
+            "required": false,
+            "schema": {
+              "default": null,
+              "nullable": true,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -656,11 +799,40 @@
               }
             },
             "description": "Not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
           }
         },
         "summary": "One dish \u2014 the QR/NFC scan target, no login",
         "tags": [
           "dining"
+        ]
+      }
+    },
+    "/api/v1/rewards/me": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Simulated BoardPlus ledger for this student",
+        "tags": [
+          "rewards"
         ]
       }
     },

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from .base import CachedBlob, ConsumptionSignal, RatingSummary, Store
+from .base import (CachedBlob, ConsumptionSignal, PushSub, RatingSummary,
+                   RewardGrant, RewardSummary, Store)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS upstream_cache (
@@ -16,17 +17,42 @@ CREATE TABLE IF NOT EXISTS upstream_cache (
     changed_at  TEXT NOT NULL
 );
 
+-- One vote per student per dish per hall. The primary key is the whole point:
+-- ratings were previously an append-only INSERT with no key, so a single account
+-- had cast 205 votes on one dish and every one counted toward the average.
+--
+-- The hall belongs in the key because the same recipe id cooked at two Houses is
+-- two different executions — a kitchen wants to know how theirs scores.
 CREATE TABLE IF NOT EXISTS rating (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    recipe_id   INTEGER NOT NULL,
-    score       INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
     user_id     TEXT    NOT NULL,
-    location_id INTEGER,
+    recipe_id   INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    score       INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
+    served_on   TEXT,
+    comment     TEXT,
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (user_id, recipe_id, location_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rating_dish ON rating(recipe_id, location_id);
+CREATE INDEX IF NOT EXISTS idx_rating_updated ON rating(updated_at);
+
+-- Immutable record of every vote and every change. The upsert above keeps only
+-- a student's current opinion; this keeps the fact that it moved, and when, so
+-- a hall can watch a dish's standing rise or fall instead of reading a lifetime
+-- average that a bad month can never shift.
+CREATE TABLE IF NOT EXISTS rating_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    score       INTEGER NOT NULL,
     served_on   TEXT,
     comment     TEXT,
     created_at  TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_rating_recipe ON rating(recipe_id);
+CREATE INDEX IF NOT EXISTS idx_rating_hist
+    ON rating_history(recipe_id, location_id, created_at);
 
 CREATE TABLE IF NOT EXISTS waste_observation (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +78,41 @@ CREATE TABLE IF NOT EXISTS attendance_intent (
 );
 CREATE INDEX IF NOT EXISTS idx_intent_service
     ON attendance_intent(location_id, served_on, meal);
+
+-- Simulated BoardPlus ledger. The composite primary key IS the anti-farming
+-- mechanism: one credit per student per location per service per kind, enforced
+-- by the database rather than by a caller who might forget. `meal` carries
+-- rewards.DAY_SCOPED (-1) for credits that belong to a whole day.
+--
+-- Two dates on purpose. `served_on` is the service the credit was earned for and
+-- is part of the key; it comes from the client and may be any date. `granted_on`
+-- is the local Boston date the credit was recorded, and it is what the daily
+-- ceiling counts — the one value a student cannot choose.
+CREATE TABLE IF NOT EXISTS reward_grant (
+    user_id     TEXT    NOT NULL,
+    location_id INTEGER NOT NULL,
+    served_on   TEXT    NOT NULL,
+    meal        INTEGER NOT NULL,
+    kind        TEXT    NOT NULL,
+    cents       INTEGER NOT NULL,
+    granted_on  TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (user_id, location_id, served_on, meal, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_reward_day ON reward_grant(user_id, granted_on);
+
+-- Web Push subscriptions, keyed on the endpoint the browser issued. Role and
+-- House are copied from the session because there is no user table to join.
+CREATE TABLE IF NOT EXISTS push_subscription (
+    endpoint    TEXT PRIMARY KEY,
+    user_sub    TEXT NOT NULL,
+    affiliation TEXT NOT NULL,
+    house_key   TEXT,
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscription(user_sub);
 """
 
 
@@ -145,44 +206,100 @@ class SqliteStore(Store):
         recipe_id: int,
         score: int,
         user_id: str,
-        location_id: int | None,
+        location_id: int,
         served_on: str | None,
         comment: str | None,
-    ) -> None:
+        recent_days: int,
+    ) -> bool:
+        now = datetime.utcnow().isoformat()
         with self._lock:
+            existing = self._conn.execute(
+                "SELECT 1 FROM rating WHERE user_id = ? AND recipe_id = ? "
+                "AND location_id = ?",
+                (user_id, recipe_id, location_id),
+            ).fetchone()
             self._conn.execute(
-                "INSERT INTO rating "
-                "(recipe_id, score, user_id, location_id, served_on, comment, created_at) "
+                """
+                INSERT INTO rating
+                    (user_id, recipe_id, location_id, score, served_on, comment,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, recipe_id, location_id) DO UPDATE SET
+                    score      = excluded.score,
+                    served_on  = excluded.served_on,
+                    comment    = excluded.comment,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, recipe_id, location_id, score, served_on, comment, now, now),
+            )
+            self._conn.execute(
+                "INSERT INTO rating_history "
+                "(user_id, recipe_id, location_id, score, served_on, comment, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    recipe_id,
-                    score,
-                    user_id,
-                    location_id,
-                    served_on,
-                    comment,
-                    datetime.utcnow().isoformat(),
-                ),
+                (user_id, recipe_id, location_id, score, served_on, comment, now),
             )
             self._conn.commit()
+        return existing is not None
 
-    def rating_summary(self, recipe_ids: list[int]) -> dict[int, RatingSummary]:
+    def rating_summary(
+        self, recipe_ids: list[int], location_id: int | None, recent_days: int
+    ) -> dict[int, RatingSummary]:
         if not recipe_ids:
             return {}
+        cutoff = (datetime.utcnow() - timedelta(days=recent_days)).isoformat()
+        where_loc = " AND location_id = ?" if location_id is not None else ""
         rows = self._conn.execute(
-            f"SELECT recipe_id, COUNT(*) AS n, AVG(score) AS avg_score "
-            f"FROM rating WHERE recipe_id IN ({_placeholders(len(recipe_ids))}) "
-            f"GROUP BY recipe_id",
-            recipe_ids,
+            f"""
+            SELECT recipe_id,
+                   COUNT(*)                                   AS n,
+                   AVG(score)                                 AS avg_score,
+                   SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END)      AS n_recent,
+                   AVG(CASE WHEN updated_at >= ? THEN score END)         AS avg_recent
+            FROM rating
+            WHERE recipe_id IN ({_placeholders(len(recipe_ids))}){where_loc}
+            GROUP BY recipe_id
+            """,
+            [cutoff, cutoff] + list(recipe_ids) + ([location_id] if location_id is not None else []),
         ).fetchall()
         return {
             r["recipe_id"]: RatingSummary(
                 recipe_id=r["recipe_id"],
                 count=r["n"],
                 average=round(r["avg_score"], 2),
+                recent_count=int(r["n_recent"] or 0),
+                recent_average=(round(r["avg_recent"], 2)
+                                if r["avg_recent"] is not None else None),
             )
             for r in rows
         }
+
+    def user_rating(
+        self, user_id: str, recipe_id: int, location_id: int
+    ) -> int | None:
+        row = self._conn.execute(
+            "SELECT score FROM rating WHERE user_id = ? AND recipe_id = ? "
+            "AND location_id = ?",
+            (user_id, recipe_id, location_id),
+        ).fetchone()
+        return None if row is None else int(row["score"])
+
+    def rating_trend(
+        self, recipe_id: int, location_id: int | None, buckets: int, days: int
+    ) -> list[tuple[str, int, float]]:
+        cutoff = (datetime.utcnow() - timedelta(days=buckets * days)).isoformat()
+        params: list = [recipe_id, cutoff]
+        where_loc = ""
+        if location_id is not None:
+            where_loc = " AND location_id = ?"
+            params.append(location_id)
+        rows = self._conn.execute(
+            f"SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS n, "
+            f"AVG(score) AS avg_score FROM rating_history "
+            f"WHERE recipe_id = ? AND created_at >= ?{where_loc} "
+            f"GROUP BY day ORDER BY day",
+            params,
+        ).fetchall()
+        return [(r["day"], int(r["n"]), round(r["avg_score"], 2)) for r in rows]
 
 
     def add_waste_observation(
@@ -278,3 +395,110 @@ class SqliteStore(Store):
             (location_id, served_on, meal),
         ).fetchone()
         return int(row["yes"] or 0), int(row["no"] or 0)
+
+
+    def grant_reward(
+        self,
+        user_id: str,
+        location_id: int,
+        served_on: str,
+        meal: int,
+        kind: str,
+        cents: int,
+        granted_on: str,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO reward_grant
+                    (user_id, location_id, served_on, meal, kind, cents,
+                     granted_on, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, location_id, served_on, meal, kind) DO NOTHING
+                """,
+                (user_id, location_id, served_on, meal, kind, cents,
+                 granted_on, datetime.utcnow().isoformat()),
+            )
+            self._conn.commit()
+        return cents if cur.rowcount else 0
+
+    def reward_summary(self, user_id: str, on_date: str) -> RewardSummary:
+        totals = self._conn.execute(
+            "SELECT COALESCE(SUM(cents), 0) AS total, COUNT(*) AS n "
+            "FROM reward_grant WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        day_row = self._conn.execute(
+            "SELECT COALESCE(SUM(cents), 0) AS total FROM reward_grant "
+            "WHERE user_id = ? AND granted_on = ?",
+            (user_id, on_date),
+        ).fetchone()
+        rows = self._conn.execute(
+            "SELECT kind, cents, location_id, served_on, meal, granted_on, created_at "
+            "FROM reward_grant WHERE user_id = ? "
+            "ORDER BY created_at DESC LIMIT 8",
+            (user_id,),
+        ).fetchall()
+        return RewardSummary(
+            pending_cents=int(totals["total"]),
+            grant_count=int(totals["n"]),
+            day_cents=int(day_row["total"]),
+            recent=tuple(
+                RewardGrant(
+                    kind=r["kind"], cents=r["cents"], location_id=r["location_id"],
+                    served_on=r["served_on"], meal=r["meal"],
+                    granted_on=r["granted_on"], created_at=r["created_at"],
+                )
+                for r in rows
+            ),
+        )
+
+
+    def put_push_sub(self, sub: PushSub) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO push_subscription
+                    (endpoint, user_sub, affiliation, house_key, p256dh, auth, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(endpoint) DO UPDATE SET
+                    user_sub    = excluded.user_sub,
+                    affiliation = excluded.affiliation,
+                    house_key   = excluded.house_key,
+                    p256dh      = excluded.p256dh,
+                    auth        = excluded.auth
+                """,
+                (sub.endpoint, sub.user_sub, sub.affiliation, sub.house_key,
+                 sub.p256dh, sub.auth, datetime.utcnow().isoformat()),
+            )
+            self._conn.commit()
+
+    def delete_push_sub(self, endpoint: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM push_subscription WHERE endpoint = ?", (endpoint,)
+            )
+            self._conn.commit()
+
+    def push_subs(
+        self, user_id: str | None = None, affiliation: str | None = None
+    ) -> list[PushSub]:
+        sql = ("SELECT endpoint, user_sub, affiliation, house_key, p256dh, auth "
+               "FROM push_subscription")
+        clauses, params = [], []
+        if user_id is not None:
+            clauses.append("user_sub = ?")
+            params.append(user_id)
+        if affiliation is not None:
+            clauses.append("affiliation = ?")
+            params.append(affiliation)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        return [
+            PushSub(
+                endpoint=r["endpoint"], user_sub=r["user_sub"],
+                affiliation=r["affiliation"], house_key=r["house_key"],
+                p256dh=r["p256dh"], auth=r["auth"],
+            )
+            for r in self._conn.execute(sql, params).fetchall()
+        ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import secrets
 import sys
 
 from apiflask import APIFlask, Schema, abort
@@ -10,14 +11,19 @@ from apiflask.fields import Boolean, Integer, String
 from apiflask.validators import Length, OneOf, Range
 from flask import current_app, g, jsonify, request, send_from_directory
 
-from . import __version__
+from . import __version__, push
 from .auth import SESSION_COOKIE, User, current_user, issue_session, login_required
-from .config import CACHE_TTL_HOURS, DB_PATH, ECS_APIKEY, STORE_BACKEND, WEB_DIR
-from .reference import (BY_KEY, BY_NETID, HOUSES, is_brunch_day, meal_name,
-                        open_dining_locations, public_list, where_can_i_eat)
+from .config import (CACHE_TTL_HOURS, DB_PATH, DEMO_MODE, ECS_APIKEY, LOCAL_TZ,
+                     MODE, RATING_RECENT_DAYS, STORE_BACKEND, TIMEZONE, WEB_DIR)
+from .rewards import (DAILY_CAP_CENTS, DAY_SCOPED, GRANTS, LABELS,
+                      format_cents, settlement_note)
+from .reference import (ANNENBERG_LOCATION, BY_KEY, BY_NETID, HOUSES,
+                        RETAIL_LOCATIONS, declaration_closes_at, is_brunch_day,
+                        meal_name, open_dining_locations, public_list,
+                        service_status, takes_attendance, where_can_i_eat)
 from .signals import SimulatedLineProvider, spice_for
 from .sources import MEAL_NAMES, DiningSource
-from .store import build_store
+from .store import PushSub, build_store
 
 API = "/api/v1"
 
@@ -27,33 +33,37 @@ DISCLAIMER = (
 
 
 class MenuQuery(Schema):
-    date = String(load_default=lambda: dt.date.today().isoformat())
+    date = String(load_default=lambda: _today())
     location = Integer(required=True)
     meal = Integer(load_default=1, validate=Range(min=0, max=2))
 
 
 class LineQuery(Schema):
-    date = String(load_default=lambda: dt.date.today().isoformat())
+    date = String(load_default=lambda: _today())
 
 
 class InterhouseQuery(Schema):
-    date = String(load_default=lambda: dt.date.today().isoformat())
+    date = String(load_default=lambda: _today())
     meal = Integer(load_default=2, validate=Range(min=0, max=2))
     house = String(load_default=None, allow_none=True)
 
 
 class AttendanceQuery(Schema):
     location = Integer(required=True)
-    date = String(load_default=lambda: dt.date.today().isoformat())
+    date = String(load_default=lambda: _today())
     meal = Integer(load_default=2, validate=Range(min=0, max=2))
 
 
 class RatingIn(Schema):
     recipe_id = Integer(required=True)
     score = Integer(required=True, validate=Range(min=1, max=5))
-    location_id = Integer(load_default=None, allow_none=True)
+    location_id = Integer(required=True)
     served_on = String(load_default=None, allow_none=True)
     comment = String(load_default=None, allow_none=True, validate=Length(max=1000))
+
+
+class RecipeQuery(Schema):
+    location = Integer(load_default=None, allow_none=True)
 
 
 class AttendanceIn(Schema):
@@ -67,12 +77,22 @@ class SignInIn(Schema):
     netid = String(required=True, validate=OneOf(list(BY_NETID)))
 
 
+class PushSubIn(Schema):
+    endpoint = String(required=True, validate=Length(max=1000))
+    p256dh = String(required=True, validate=Length(max=256))
+    auth = String(required=True, validate=Length(max=256))
+
+
+class PushEndpointIn(Schema):
+    endpoint = String(required=True, validate=Length(max=1000))
+
+
 def _svc():
     return current_app.extensions["veritaste"]
 
 
 def _today() -> str:
-    return dt.date.today().isoformat()
+    return dt.datetime.now(LOCAL_TZ).date().isoformat()
 
 
 def _parse_date(value: str) -> dt.date:
@@ -108,6 +128,77 @@ def _freshness(status: str, age_hours: float | None) -> dict:
     return {"status": status, "age_hours": age_hours, "warn": stale, "message": message}
 
 
+def _season_notice(location: int, date: str, serves_today: bool, serves_this_week: bool) -> str | None:
+    if serves_today or serves_this_week:
+        return None
+    if location == ANNENBERG_LOCATION:
+        return "no_menus"
+    try:
+        rows, _status = _svc().dining.day_rows(date, ANNENBERG_LOCATION)
+    except Exception:
+        return None
+    return "hall_closed" if any("meal" in r for r in rows) else "no_menus"
+
+
+def _declaration_window(
+    location_id: int, served_on: str, meal: int
+) -> tuple[bool, str | None, str | None]:
+    if not takes_attendance(location_id):
+        return False, None, None
+    try:
+        on = dt.date.fromisoformat(served_on)
+    except ValueError:
+        return False, None, None
+
+    now = dt.datetime.now(LOCAL_TZ)
+    closes = declaration_closes_at(location_id, on, meal, LOCAL_TZ)
+    status = service_status(location_id, on, meal, LOCAL_TZ, now)
+    return status == "upcoming", closes.isoformat(timespec="minutes"), status
+
+
+def _demo_sub(account) -> str:
+    if not DEMO_MODE:
+        return account.sub
+    return f"{account.sub}.{secrets.token_urlsafe(9)}"
+
+
+def _award(user: User, kind: str, location_id: int | None,
+           served_on: str | None, meal: int) -> dict | None:
+    if location_id is None:
+        return None
+
+    svc = _svc()
+    day = served_on or _today()
+    today = _today()
+    cents = GRANTS.get(kind, 0)
+
+    before = svc.store.reward_summary(user.sub, today)
+    if before.day_cents + cents > DAILY_CAP_CENTS:
+        return {
+            "simulated": True, "granted_cents": 0, "granted_display": None,
+            "reason": LABELS.get(kind, kind), "already_earned": False,
+            "capped": True,
+            "pending_cents": before.pending_cents,
+            "pending_display": format_cents(before.pending_cents),
+        }
+
+    granted = svc.store.grant_reward(
+        user_id=user.sub, location_id=location_id, served_on=day,
+        meal=meal, kind=kind, cents=cents, granted_on=today,
+    )
+    after = svc.store.reward_summary(user.sub, today)
+    return {
+        "simulated": True,
+        "granted_cents": granted,
+        "granted_display": format_cents(granted) if granted else None,
+        "reason": LABELS.get(kind, kind),
+        "already_earned": granted == 0,
+        "capped": False,
+        "pending_cents": after.pending_cents,
+        "pending_display": format_cents(after.pending_cents),
+    }
+
+
 def _item(recipe: dict, rating, consumption) -> dict:
     spice = spice_for(recipe)
     return {
@@ -121,6 +212,9 @@ def _item(recipe: dict, rating, consumption) -> dict:
         "spice": {"level": spice.level, "curated": spice.curated, "basis": spice.basis},
         "rating": None if rating is None else {
             "average": rating.average, "count": rating.count,
+            "recent_average": rating.recent_average,
+            "recent_count": rating.recent_count,
+            "recent_days": RATING_RECENT_DAYS,
         },
         "consumption": None if consumption is None else {
             "rate": consumption.rate,
@@ -204,6 +298,8 @@ def _register(app: APIFlask) -> None:
             "version": __version__,
             "store": STORE_BACKEND,
             "cache_ttl_hours": CACHE_TTL_HOURS,
+            "mode": MODE,
+            "notifications": push.enabled(),
             "disclaimer": DISCLAIMER,
         }
 
@@ -226,11 +322,19 @@ def _register(app: APIFlask) -> None:
         brunch = is_brunch_day(day)
         served = sorted({r["meal"] for r in day if "meal" in r})
         profile = svc.dining.service_profile(date, location)
+        window = _declaration_window(location, date, meal)
 
         base = {
             "date": date, "location": location, "meal": meal,
             "meal_name": meal_name(location, meal, is_brunch=brunch),
             "freshness": freshness,
+            "takes_attendance": takes_attendance(location),
+            "declaration_open": window[0],
+            "declaration_closes_at": window[1],
+            "service_status": window[2],
+            "season_notice": _season_notice(
+                location, date, bool(served), bool(profile)
+            ),
             "meals_served": served,
             "meal_options": [
                 {
@@ -247,7 +351,7 @@ def _register(app: APIFlask) -> None:
         recipe_ids = sorted({r["recipe"] for r in rows})
         recipes = svc.dining.recipes(recipe_ids)
         categories = {c["id"]: c["name"] for c in svc.dining.categories()}
-        ratings = svc.store.rating_summary(recipe_ids)
+        ratings = svc.store.rating_summary(recipe_ids, location, RATING_RECENT_DAYS)
         consumption = svc.store.consumption_signals(recipe_ids)
 
         grouped: dict[str, list[dict]] = {}
@@ -271,22 +375,35 @@ def _register(app: APIFlask) -> None:
         }
 
     @app.get(f"{API}/recipes/<int:recipe_id>")
+    @app.input(RecipeQuery, location="query")
     @app.doc(tags=["dining"], summary="One dish — the QR/NFC scan target, no login")
-    def recipe_detail(recipe_id: int):
+    def recipe_detail(recipe_id: int, query_data):
         svc = _svc()
         try:
             recipe = svc.dining.recipe(recipe_id)
         except Exception:
             abort(404, f"No recipe {recipe_id}")
 
+        location = query_data.get("location")
         spice = spice_for(recipe)
-        rating = svc.store.rating_summary([recipe_id]).get(recipe_id)
+        rating = svc.store.rating_summary(
+            [recipe_id], location, RATING_RECENT_DAYS
+        ).get(recipe_id)
         consumption = svc.store.consumption_signals([recipe_id]).get(recipe_id)
+
+        user = current_user()
+        yours = (svc.store.user_rating(user.sub, recipe_id, location)
+                 if user is not None and location is not None else None)
+
         return {
             **recipe,
             "spice": {"level": spice.level, "curated": spice.curated, "basis": spice.basis},
+            "your_rating": yours,
             "rating": None if rating is None else {
                 "average": rating.average, "count": rating.count,
+                "recent_average": rating.recent_average,
+                "recent_count": rating.recent_count,
+                "recent_days": RATING_RECENT_DAYS,
             },
             "consumption": None if consumption is None else {
                 "rate": consumption.rate,
@@ -386,16 +503,28 @@ def _register(app: APIFlask) -> None:
     def add_rating(json_data):
         user = current_user()
         svc = _svc()
-        svc.store.add_rating(
+        location_id = json_data["location_id"]
+        changed = svc.store.add_rating(
             recipe_id=json_data["recipe_id"], score=json_data["score"],
-            user_id=user.sub, location_id=json_data.get("location_id"),
+            user_id=user.sub, location_id=location_id,
             served_on=json_data.get("served_on"), comment=json_data.get("comment"),
+            recent_days=RATING_RECENT_DAYS,
         )
-        got = svc.store.rating_summary([json_data["recipe_id"]]).get(json_data["recipe_id"])
+        got = svc.store.rating_summary(
+            [json_data["recipe_id"]], location_id, RATING_RECENT_DAYS
+        ).get(json_data["recipe_id"])
+        reward = _award(
+            user, "rating", json_data.get("location_id"),
+            json_data.get("served_on"), DAY_SCOPED,
+        )
         return {
             "recorded": True, "recipe_id": json_data["recipe_id"],
+            "changed": changed,
             "average": got.average if got else float(json_data["score"]),
             "count": got.count if got else 1,
+            "recent_average": got.recent_average if got else float(json_data["score"]),
+            "recent_count": got.recent_count if got else 1,
+            "reward": reward,
         }, 201
 
     @app.post(f"{API}/attendance")
@@ -406,18 +535,37 @@ def _register(app: APIFlask) -> None:
     def set_attendance(json_data):
         user = current_user()
         svc = _svc()
+        location_id = json_data["location_id"]
+
+        if not takes_attendance(location_id):
+            abort(400, f"{RETAIL_LOCATIONS[location_id]} serves walk-up customers, "
+                       "so there is nothing to tell the kitchen in advance.")
+
         served_on = json_data.get("served_on") or _today()
+
+        open_now, _closes_at, status = _declaration_window(
+            location_id, served_on, json_data["meal"]
+        )
+        if not open_now:
+            abort(400, "Declarations for that meal have closed — the kitchen has "
+                       "already cooked to it."
+                       if status in ("serving", "over") else
+                       "That meal cannot be declared for.")
         svc.store.set_attendance_intent(
-            user_id=user.sub, location_id=json_data["location_id"],
+            user_id=user.sub, location_id=location_id,
             served_on=served_on, meal=json_data["meal"],
             attending=json_data["attending"],
         )
         yes, no = svc.store.attendance_counts(
-            json_data["location_id"], served_on, json_data["meal"]
+            location_id, served_on, json_data["meal"]
+        )
+        reward = _award(
+            user, "attendance", location_id, served_on, json_data["meal"]
         )
         return {
             "recorded": True, "attending": json_data["attending"],
             "declared_attending": yes, "declared_absent": no,
+            "reward": reward,
         }, 201
 
 
@@ -451,7 +599,7 @@ def _register(app: APIFlask) -> None:
     def demo_signin(json_data):
         account = BY_NETID[json_data["netid"]]
         user = User(
-            sub=account.sub, name=account.name,
+            sub=_demo_sub(account), name=account.name,
             principal=account.principal, affiliation=account.affiliation,
             house_key=account.house_key if account.house_key in BY_KEY else None,
             demo=True,
@@ -459,7 +607,7 @@ def _register(app: APIFlask) -> None:
         resp = jsonify({
             "signed_in": True, "name": user.name, "netid": account.netid,
             "affiliation": user.affiliation, "house_key": user.house_key,
-            "demo": True,
+            "demo": True, "mode": MODE,
         })
         resp.set_cookie(SESSION_COOKIE, issue_session(user),
                         httponly=True, samesite="Lax", max_age=12 * 3600)
@@ -468,9 +616,118 @@ def _register(app: APIFlask) -> None:
     @app.post(f"{API}/auth/signout")
     @app.doc(tags=["auth"], summary="Clear the session")
     def signout():
+        user = current_user()
+        if user is not None and DEMO_MODE:
+            store = _svc().store
+            for sub in store.push_subs(user_id=user.sub):
+                store.delete_push_sub(sub.endpoint)
+
         resp = jsonify({"signed_in": False})
         resp.delete_cookie(SESSION_COOKIE)
         return resp
+
+
+    @app.get(f"{API}/rewards/me")
+    @login_required
+    @app.doc(tags=["rewards"], summary="Simulated BoardPlus ledger for this student")
+    def rewards_me():
+        user = current_user()
+        today = _today()
+        summary = _svc().store.reward_summary(user.sub, today)
+        return {
+            "simulated": True,
+            "pending_cents": summary.pending_cents,
+            "pending_display": format_cents(summary.pending_cents),
+            "today": today,
+            "timezone": TIMEZONE,
+            "cap_cents": DAILY_CAP_CENTS,
+            "cap_display": format_cents(DAILY_CAP_CENTS),
+            "day_cents": summary.day_cents,
+            "grant_count": summary.grant_count,
+            "grants": [
+                {
+                    "kind": g.kind, "reason": LABELS.get(g.kind, g.kind),
+                    "cents": g.cents, "display": format_cents(g.cents),
+                    "location_id": g.location_id, "served_on": g.served_on,
+                    "granted_on": g.granted_on,
+                    "meal": None if g.meal == DAY_SCOPED else g.meal,
+                }
+                for g in summary.recent
+            ],
+            "earn_rates": {
+                kind: {"cents": cents, "display": format_cents(cents),
+                       "reason": LABELS.get(kind, kind)}
+                for kind, cents in GRANTS.items()
+            },
+            "settlement": settlement_note(),
+        }
+
+
+    @app.get(f"{API}/push/vapid")
+    @app.doc(tags=["notifications"], summary="Application server key for subscribing")
+    def push_vapid():
+        return {"enabled": push.enabled(), "public_key": push.public_key()}
+
+    @app.post(f"{API}/push/subscriptions")
+    @app.input(PushSubIn)
+    @login_required
+    @app.doc(tags=["notifications"], summary="Register this browser for notifications")
+    def push_subscribe(json_data):
+        if not push.enabled():
+            abort(503, "Notifications are not configured on this server.")
+        user = current_user()
+        _svc().store.put_push_sub(PushSub(
+            endpoint=json_data["endpoint"], user_sub=user.sub,
+            affiliation=user.affiliation, house_key=user.house_key,
+            p256dh=json_data["p256dh"], auth=json_data["auth"],
+        ))
+        return {"subscribed": True}, 201
+
+    @app.delete(f"{API}/push/subscriptions")
+    @app.input(PushEndpointIn, location="query")
+    @login_required
+    @app.doc(tags=["notifications"], summary="Unsubscribe this browser")
+    def push_unsubscribe(query_data):
+        _svc().store.delete_push_sub(query_data["endpoint"])
+        return {"subscribed": False}
+
+    @app.post(f"{API}/push/test")
+    @login_required
+    @app.doc(tags=["notifications"],
+             summary="Send this account's own subscriptions a preview notification")
+    def push_test():
+        if not push.enabled():
+            abort(503, "Notifications are not configured on this server.")
+
+        user = current_user()
+        svc = _svc()
+        subs = svc.store.push_subs(user_id=user.sub)
+        if not subs:
+            abort(409, "This browser is not subscribed to notifications yet.")
+
+        if user.affiliation == "staff":
+            body = ("Preview — before prep: yesterday's most-wasted items are "
+                    "waiting for a production decision.")
+            target = "/"
+        else:
+            body = ("Preview — one tap tells the kitchen your plans for tonight. "
+                    "Saying you're not coming helps them most.")
+            target = "/"
+
+        sent, reasons = 0, []
+        for sub in subs:
+            ok, status, reason = push.send(
+                sub.as_subscription_info(), "Veritaste", body, target
+            )
+            if ok:
+                sent += 1
+            else:
+                if reason:
+                    reasons.append(reason)
+                if status in push.DEAD_STATUSES:
+                    svc.store.delete_push_sub(sub.endpoint)
+        return {"sent": sent, "subscriptions": len(subs),
+                "reason": reasons[0] if reasons else None}
 
 
     @app.get("/")

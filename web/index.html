@@ -5,10 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Veritaste — Harvard dining, measured</title>
 <meta name="description" content="Student course project: dining hall menus, ratings, line times and food-waste signals.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Montserrat:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/app.css">
+
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="theme-color" content="#A51C30">
 </head>
 <body>
 
@@ -37,14 +39,16 @@
 </div>
 
 <nav class="top">
-  <ul>
-    <li><a href="#" aria-current="page">Menu</a></li>
-    <li><a href="#lines">Line times</a></li>
-    <li><a href="#where">Where can I eat?</a></li>
-  </ul>
+  <button class="nav__toggle" id="navToggle" aria-expanded="false" aria-controls="navList">
+    <span class="nav__bars" aria-hidden="true"></span>
+    <span id="navCurrent">Menu</span>
+  </button>
+  <ul id="navList"></ul>
 </nav>
 
 <main class="wrap">
+
+<section class="pane" id="pane-menu">
 
   <div class="controls">
     <div class="field">
@@ -65,8 +69,8 @@
   <section class="card rsvp" id="tonight">
     <div class="rsvp__copy">
       <h2 id="rsvpQ">Eating here tonight?</h2>
-      <p>Telling the kitchen you're <em>not</em> coming is the useful part — it
-         helps them learn demand is light before the food is cooked.</p>
+      <p id="rsvpWhy">Telling the kitchen you're <em>not</em> coming is the useful
+         part — it helps them learn demand is light before the food is cooked.</p>
     </div>
 
     <div class="rsvp__act">
@@ -76,6 +80,7 @@
   </section>
 
   <div class="cols">
+
     <section class="card">
       <div class="card__hd">
         <h2>Menu</h2>
@@ -111,20 +116,61 @@
         </div>
       </div>
 
-      <div class="card" id="where">
-        <div class="card__hd"><h2 id="whereTitle">Where can I eat?</h2></div>
-        <div class="card__bd" id="interhouse">
-          <div class="state" style="padding:20px 0">Loading house rules…</div>
+      <div class="card" id="walletCard" hidden>
+        <div class="card__hd">
+          <h2>BoardPlus</h2><span class="sim">simulated</span>
+        </div>
+        <div class="card__bd">
+          <div class="wallet__amt" id="walletAmt">$0.00</div>
+          <div class="wallet__rates" id="walletRates"></div>
+          <div class="sec" id="walletLogSec" hidden>
+            <h4>Recent</h4>
+            <div id="walletLog"></div>
+          </div>
+
+          <div class="wallet__sub">Earn more by helping the kitchen plan ahead</div>
         </div>
       </div>
 
     </aside>
   </div>
+
+</section>
+
+<section class="pane" id="pane-where" hidden>
+  <div class="card">
+    <div class="card__hd"><h2 id="whereTitle">Where can I eat?</h2></div>
+    <div class="card__bd" id="interhouse">
+      <div class="state" style="padding:20px 0">Loading house rules…</div>
+    </div>
+  </div>
+</section>
+
+<section class="pane" id="pane-account" hidden>
+  <div class="acct">
+
+    <div class="card" id="pushCard" hidden>
+      <div class="card__hd"><h2>Notifications</h2></div>
+      <div class="card__bd">
+        <p class="push__lead" id="pushLead"></p>
+        <div class="push__act" id="pushAct"></div>
+        <p class="push__hint" id="pushHint"></p>
+      </div>
+    </div>
+
+    <div class="card" id="acctWho">
+      <div class="card__hd"><h2>Signed in as</h2></div>
+      <div class="card__bd" id="acctWhoBody"></div>
+    </div>
+  </div>
+</section>
+
 </main>
 
 <footer><div class="wrap">
   This is not affiliated with or endorsed by Harvard University or HUDS.
 </div></footer>
+
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="shTitle">
   <div class="sheet__hd">
@@ -133,7 +179,6 @@
   </div>
   <div class="sheet__bd" id="shBody"></div>
 </div>
-
 <div class="toast" id="toast"></div>
 
 <script src="/app.js"></script>

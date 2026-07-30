@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="192" height="192">
+  <!-- The Veritaste mark: a fork whose tines become a sprig, inside a circle —
+       dining plus sustainability. Not a shield, and not derived from any
+       Harvard insignia. Crimson field here because an app icon is an identity
+       moment, which is exactly what crimson is reserved for. -->
+  <rect width="40" height="40" rx="6" fill="#A51C30"/>
+  <g fill="none" stroke="#fff" stroke-width="2">
+    <circle cx="20" cy="20" r="13.5"/>
+    <path d="M20 28.5 V17.5" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M20 18 C20 12.5, 15.5 10.8, 13.2 10.4 C13.2 14.6, 16.3 17.6, 20 18 Z" fill="#fff"/>
+    <path d="M20 18 C20 12.5, 24.5 10.8, 26.8 10.4 C26.8 14.6, 23.7 17.6, 20 18 Z"
+          stroke-width="1.8" stroke-linejoin="round"/>
+  </g>
+</svg>

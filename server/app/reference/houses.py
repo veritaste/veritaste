@@ -52,6 +52,18 @@ OPEN_LOCATIONS: dict[int, str] = {
 
 ANNENBERG_LOCATION = 30
 
+RETAIL_LOCATIONS: dict[int, str] = {
+    4: "Dudley Cafe",
+    27: "Sebastian's Cafe",
+    54: "Northwest Cafe",
+    41: "Chauhaus at the GSD",
+    3: "Cronkhite Dining Room",
+}
+
+
+def takes_attendance(location_id: int) -> bool:
+    return location_id not in RETAIL_LOCATIONS
+
 
 def houses_at(location_id: int) -> list[House]:
     return [h for h in HOUSES if h.location_id == location_id]

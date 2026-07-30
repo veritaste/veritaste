@@ -17,9 +17,12 @@ class CachedBlob:
 
 @dataclass(frozen=True)
 class RatingSummary:
+
     recipe_id: int
     count: int
     average: float
+    recent_count: int
+    recent_average: float | None
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,44 @@ class ConsumptionSignal:
     recipe_id: int
     rate: float
     observations: int
+
+
+@dataclass(frozen=True)
+class RewardGrant:
+
+    kind: str
+    cents: int
+    location_id: int
+    served_on: str
+    meal: int
+    granted_on: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class RewardSummary:
+
+    pending_cents: int
+    grant_count: int
+    day_cents: int
+    recent: tuple[RewardGrant, ...]
+
+
+@dataclass(frozen=True)
+class PushSub:
+
+    endpoint: str
+    user_sub: str
+    affiliation: str
+    house_key: str | None
+    p256dh: str
+    auth: str
+
+    def as_subscription_info(self) -> dict:
+        return {
+            "endpoint": self.endpoint,
+            "keys": {"p256dh": self.p256dh, "auth": self.auth},
+        }
 
 
 class Store(ABC):
@@ -59,14 +100,30 @@ class Store(ABC):
         recipe_id: int,
         score: int,
         user_id: str,
-        location_id: int | None,
+        location_id: int,
         served_on: str | None,
         comment: str | None,
-    ) -> None:
+        recent_days: int,
+    ) -> bool:
         ...
 
     @abstractmethod
-    def rating_summary(self, recipe_ids: list[int]) -> dict[int, RatingSummary]: ...
+    def rating_summary(
+        self, recipe_ids: list[int], location_id: int | None, recent_days: int
+    ) -> dict[int, RatingSummary]:
+        ...
+
+    @abstractmethod
+    def user_rating(
+        self, user_id: str, recipe_id: int, location_id: int
+    ) -> int | None:
+        ...
+
+    @abstractmethod
+    def rating_trend(
+        self, recipe_id: int, location_id: int | None, buckets: int, days: int
+    ) -> list[tuple[str, int, float]]:
+        ...
 
 
     @abstractmethod
@@ -97,4 +154,37 @@ class Store(ABC):
     def attendance_counts(
         self, location_id: int, served_on: str, meal: int
     ) -> tuple[int, int]:
+        ...
+
+
+    @abstractmethod
+    def grant_reward(
+        self,
+        user_id: str,
+        location_id: int,
+        served_on: str,
+        meal: int,
+        kind: str,
+        cents: int,
+        granted_on: str,
+    ) -> int:
+        ...
+
+    @abstractmethod
+    def reward_summary(self, user_id: str, on_date: str) -> RewardSummary:
+        ...
+
+
+    @abstractmethod
+    def put_push_sub(self, sub: PushSub) -> None:
+        ...
+
+    @abstractmethod
+    def delete_push_sub(self, endpoint: str) -> None:
+        ...
+
+    @abstractmethod
+    def push_subs(
+        self, user_id: str | None = None, affiliation: str | None = None
+    ) -> list[PushSub]:
         ...

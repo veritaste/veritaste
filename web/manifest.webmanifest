@@ -1,0 +1,18 @@
+{
+  "name": "Veritaste",
+  "short_name": "Veritaste",
+  "description": "Harvard dining menus, ratings, line times and food-waste signals. A Harvard Summer School ENSC S-106 project, not affiliated with or endorsed by Harvard University or HUDS.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F3F3F1",
+  "theme_color": "#A51C30",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    }
+  ]
+}

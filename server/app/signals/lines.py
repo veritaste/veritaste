@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
+from ..config import LOCAL_TZ
+
 
 @dataclass(frozen=True)
 class LineReading:
@@ -65,7 +67,7 @@ class SimulatedLineProvider(LineLengthProvider):
         return 0.85 + seed / 333.0
 
     def current(self, location_id: int, now: datetime | None = None) -> LineReading:
-        now = now or datetime.now()
+        now = now or datetime.now(LOCAL_TZ)
         curve = self._curve(now.date())
         idx = _bucket_index(now.time())
 
