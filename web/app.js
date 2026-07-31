@@ -45,10 +45,12 @@ async function api(path, opts = {}) {
 
 const PANES = [
   { id: "menu",    label: "Menu",             roles: null },
+  { id: "grill",   label: "Order the grill",  roles: null },
 
   { id: "where",   label: "Where can I eat?", staffLabel: "Interhouse rules", roles: null },
 
   { id: "availability", label: "Availability Board", roles: ["staff"] },
+  { id: "station", label: "Grill station", roles: ["staff"] },
   { id: "account", label: "My account",       roles: null },
 ];
 
@@ -59,6 +61,7 @@ function panesFor(user) {
   const role = user ? user.affiliation : null;
   return PANES.filter(p => !p.roles || (role && p.roles.includes(role)));
 }
+
 function defaultPane(user) {
   return user && user.affiliation === "staff" ? "menu" : "menu";
 }
@@ -91,7 +94,12 @@ function showPane(id, { push = true } = {}) {
   document.querySelectorAll(".pane").forEach(el =>
     el.hidden = el.id !== `pane-${id}`);
   renderNav();
+
+  const pane = PANES.find(p => p.id === id);
+  if (pane) document.title = `${paneLabel(pane, state.user)} — Veritaste`;
   if (id === "availability") loadBoard();
+  if (id === "grill") startGrillPoll(); else stopGrillPoll();
+  if (id === "station") startStationPoll(); else stopStationPoll();
   if (push) writeUrl();
   window.scrollTo({ top: 0 });
 }
@@ -198,7 +206,7 @@ function renderWho() {
 
 function signIn() {
 
-  window.location.href = "/signin.html";
+  window.location.href = "/signin";
 }
 async function loadMe() {
   try {
@@ -535,12 +543,16 @@ async function loadMenu() {
 
   box.innerHTML = [...data.categories]
     .sort((a, b) => catRank(a.name) - catRank(b.name) || a.name.localeCompare(b.name))
-    .map(c => `<div class="cat"><h3>${esc(c.name)}</h3>${c.items.map(dishRow).join("")}</div>`)
+    .map(c => `<div class="cat"><h3>${esc(c.name)}${
+      c.name.trim().toLowerCase() === "from the grill"
+        ? ` <button class="textlink" data-grillgo>(order from the grill)</button>`
+        : ""}</h3>${c.items.map(dishRow).join("")}</div>`)
     .join("");
 
+  box.querySelector("[data-grillgo]")
+    ?.addEventListener("click", () => showPane("grill"));
   box.querySelectorAll(".dish").forEach(b =>
     b.addEventListener("click", () => openSheet(Number(b.dataset.id))));
-
   updateContextNotices(data);
 
   if (state.pane === "availability") renderBoard();
@@ -588,15 +600,378 @@ function updateContextNotices(data) {
   renderLineCard();
 }
 
+const GRILL_POLL_MS = 5000;
+
+const GRILL_WHY = {
+  not_serving: "This hall isn't serving right now.",
+  closed: "The grill is closed to app orders right now.",
+  paused: "The grill has paused online orders — you can order in person "
+          + "at the counter.",
+  station_offline: "The grill isn't taking online orders right now.",
+  walk_up: null,
+  wait_cap: "The grill is backed up with online orders — "
+            + "come down and order at the counter.",
+};
+
+function startGrillPoll() {
+  loadGrill();
+  if (!state.grillTimer) state.grillTimer = setInterval(loadGrill, GRILL_POLL_MS);
+}
+function stopGrillPoll() {
+  if (state.grillTimer) { clearInterval(state.grillTimer); state.grillTimer = null; }
+}
+async function loadGrill() {
+
+  const sel = $("#grillHall");
+  if (!sel.options.length) {
+    sel.innerHTML = $("#hall").innerHTML;
+    sel.addEventListener("change", () => {
+      state.hall = Number(sel.value);
+      syncControls();
+      writeUrl();
+      refreshContext();
+      state.grillRaw = null;
+      loadGrill();
+    });
+  }
+  sel.value = String(state.hall);
+  let g;
+  try { g = await api(`/grill?location=${state.hall}`); }
+  catch (e) {
+    $("#grillBody").innerHTML = `<div class="state">${esc(e.message)}</div>`;
+    return;
+  }
+  const raw = JSON.stringify(g);
+  if (raw === state.grillRaw) return;
+  state.grillRaw = raw;
+  state.grill = g;
+  renderGrill();
+}
+
+function hallNameById(id) {
+  const opt = [...$("#hall").options].find(o => Number(o.value) === id);
+  return opt ? opt.textContent : `hall ${id}`;
+}
+
+function renderGrill() {
+  const g = state.grill;
+  const box = $("#grillBody");
+  if (!state.grillSel) state.grillSel = { main: null, conds: new Set() };
+
+  if (g.your_order) {
+    const o = g.your_order;
+    const steps = ["placed", "seen", "cooking", "ready"];
+    const at = steps.indexOf(o.status);
+    const elsewhere = o.location_id !== state.hall
+      ? ` at ${esc(hallNameById(o.location_id))}` : "";
+    box.innerHTML = `
+      <div class="gorder">
+        <div class="gorder__msg">${esc(o.message)}</div>
+        <div class="gorder__items">${esc(o.main.name)}${
+          o.condiments.length
+            ? " · " + esc(o.condiments.map(c => c.name).join(", ")) : ""
+        }${elsewhere}</div>
+        <div class="gsteps">${steps.map((s, i) => `
+          <span class="gstep${i < at ? " on" : ""}${i === at ? " now" : ""}"
+            >${s}</span>`).join("")}</div>
+        ${o.cancellable
+          ? `<button class="btn ghost" id="grillCancel">Cancel this order</button>`
+          : ""}
+      </div>`;
+    $("#grillCancel")?.addEventListener("click", async () => {
+      try { await api(`/grill/orders/${o.id}`, { method: "DELETE" }); }
+      catch (e) { grillMsg(e.message); }
+      state.grillSel = null;
+      state.grillRaw = null;
+      loadGrill();
+    });
+    return;
+  }
+
+  if (g.dining_allowed === false) {
+    box.innerHTML = `
+      <p class="grill-status">Interhouse rules don't allow you to dine here
+        for this meal, so the grill here can't take your order${
+        g.dining_reason ? ` — ${esc(g.dining_reason)}` : "."}</p>
+      <p class="grill-status"><button class="textlink" id="grillWhere">See
+        where you can eat</button></p>`;
+    $("#grillWhere").addEventListener("click", () => showPane("where"));
+    return;
+  }
+
+  if (!g.accepting_now) {
+    const reasons = g.why_not || [];
+
+    if (reasons.includes("not_serving")) {
+      const mins = g.next_service_min;
+      box.innerHTML = `<p class="grill-status">${esc(GRILL_WHY.not_serving)}</p>`
+        + (mins != null ? `
+          <p class="grill-status">Mealtime starts in about ${mins}
+            minute${mins === 1 ? "" : "s"}.</p>` : "");
+      return;
+    }
+
+    const why = reasons
+      .map(r => r === "walk_up" ? g.walk_up_message : GRILL_WHY[r])
+      .filter(Boolean);
+
+    const counter = reasons.includes("station_offline")
+      ? `<p class="grill-status">If the grill is open, you may place an
+           order at the counter instead.</p>` : "";
+    box.innerHTML = `<p class="grill-status">${esc(why[0] || "The grill is not taking app orders.")}</p>`
+      + counter
+      + (g.station_online && g.open_app_orders
+         ? `<p class="grill-status">${g.open_app_orders} app order${
+             g.open_app_orders === 1 ? "" : "s"} on the grill right now.</p>` : "");
+    return;
+  }
+  if (!g.mains.length) {
+    box.innerHTML = `<p class="grill-status">The grill isn't open during
+      this meal.</p>`;
+    return;
+  }
+
+  if (!state.user) {
+    box.innerHTML = `
+      <p class="grill-status">The grill is taking app orders${
+        g.state === "backed_up"
+          ? ` — backed up, about ${g.estimated_wait_min} min before cooking starts`
+          : ""}.</p>
+      <p class="grill-status">Sign in to place one.</p>
+      <button class="btn ghost" id="grillSignin">Sign in</button>`;
+    $("#grillSignin").addEventListener("click", signIn);
+    return;
+  }
+
+  const opt = (i, kind) => {
+    const isMain = kind === "main";
+    const checked = isMain
+      ? state.grillSel.main === i.id
+      : state.grillSel.conds.has(i.id);
+    const meta = isMain
+      ? [i.calories ? `${i.calories} cal` : null, i.serving_size]
+          .filter(Boolean).join(" · ")
+      : (i.calories ? `${i.calories} cal` : "");
+    return `<div class="gopt${i.out ? " out" : ""}${isMain ? " gopt--main" : ""}">
+      <label class="gopt__pick">
+        <input type="${isMain ? "radio" : "checkbox"}"
+               name="${isMain ? "gmain" : "gcond"}"
+               value="${i.id}" ${checked ? "checked" : ""} ${i.out ? "disabled" : ""}>
+        <span class="gopt__body">
+          <span class="gopt__name">${esc(i.name)}${
+            i.out ? ` <span class="gopt__ran">ran out</span>` : ""}</span>
+          ${meta ? `<span class="gopt__meta">${meta}</span>` : ""}
+          ${isMain ? `<span class="chips">${chips(i)}</span>` : ""}
+        </span>
+      </label>
+      ${isMain ? `<button type="button" class="textlink"
+        data-sheet="${i.id}">(details)</button>` : ""}
+    </div>`;
+  };
+
+  const selMain = g.mains.find(m => m.id === state.grillSel.main);
+  const conds = selMain
+    ? g.condiments.filter(c => (selMain.condiments || []).includes(c.id))
+    : g.condiments;
+
+  box.innerHTML = `
+    <p class="grill-status">Taking app orders now${g.estimated_wait_min
+      ? ` — about ${g.estimated_wait_min} min` : ""}.</p>
+    <h3 class="gsec">Choose one</h3>
+    ${g.mains.map(i => opt(i, "main")).join("")}
+    ${conds.length ? `<h3 class="gsec">With</h3>
+      ${conds.map(i => opt(i, "cond")).join("")}`
+      : (selMain ? `<p class="grill-status" style="margin-top:14px">This one
+          comes as it is.</p>` : "")}
+    <p class="grill-msg" id="grillMsg" hidden></p>
+    <button class="btn" id="grillPlace" style="margin-top:14px"
+            ${state.grillSel.main ? "" : "disabled"}>Place order</button>`;
+
+  box.querySelectorAll("[data-sheet]").forEach(b =>
+    b.addEventListener("click", () => openSheet(Number(b.dataset.sheet))));
+  box.querySelectorAll("input[name=gmain]").forEach(r =>
+    r.addEventListener("change", () => {
+      state.grillSel.main = Number(r.value);
+      const allowed = new Set(
+        (g.mains.find(m => m.id === state.grillSel.main)?.condiments) || []);
+      state.grillSel.conds = new Set(
+        [...state.grillSel.conds].filter(id => allowed.has(id)));
+      renderGrill();
+    }));
+  box.querySelectorAll("input[name=gcond]").forEach(c =>
+    c.addEventListener("change", () => {
+      const id = Number(c.value);
+      if (c.checked) state.grillSel.conds.add(id);
+      else state.grillSel.conds.delete(id);
+    }));
+  $("#grillPlace").addEventListener("click", async () => {
+    try {
+      await api("/grill/orders", { method: "POST", body: {
+        location_id: state.hall,
+        main_id: state.grillSel.main,
+        condiments: [...state.grillSel.conds],
+      } });
+      state.grillSel = null;
+      state.grillRaw = null;
+      loadGrill();
+    } catch (e) { grillMsg(e.message); }
+  });
+}
+
+function grillMsg(text) {
+  const el = $("#grillMsg");
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text || "";
+}
+
+const STATION_POLL_MS = 3000;
+
+function startStationPoll() {
+  loadStation();
+  if (!state.stationTimer)
+    state.stationTimer = setInterval(loadStation, STATION_POLL_MS);
+}
+
+function stopStationPoll() {
+  if (state.stationTimer) {
+    clearInterval(state.stationTimer);
+    state.stationTimer = null;
+  }
+}
+
+async function loadStation() {
+  if (!state.user || state.user.affiliation !== "staff") return;
+
+  const sel = $("#stationHall");
+  if (!sel.options.length) {
+    sel.innerHTML = $("#hall").innerHTML;
+    sel.addEventListener("change", () => {
+      state.hall = Number(sel.value);
+      syncControls();
+      writeUrl();
+      refreshContext();
+      state.station = null;
+      loadStation();
+    });
+  }
+  sel.value = String(state.hall);
+
+  if (!state.user.kitchen) {
+    stopStationPoll();
+    $("#stationBody").innerHTML = `
+      <div class="board__lockednote">
+        <p>The station screen polls the kitchen — that poll is what tells
+          students the grill can see their orders, so running it needs the
+          kitchen unlock.</p>
+        <p><a class="textlink" href="/staffunlock?then=${
+          encodeURIComponent("/?pane=station")}">Unlock kitchen actions</a>
+          to run the station.</p>
+      </div>`;
+    return;
+  }
+
+  let st;
+  try { st = await api(`/grill/station?location=${state.hall}`); }
+  catch (e) {
+    $("#stationBody").innerHTML = `<div class="state">${esc(e.message)}</div>`;
+    return;
+  }
+  state.station = st;
+  renderStation();
+}
+
+const _STATION_ACT = {
+  seen: ["cooking", "Start cooking"],
+  cooking: ["ready", "Ready"],
+  ready: ["collected", "Collected"],
+};
+function renderStation() {
+  const st = state.station;
+  const box = $("#stationBody");
+
+  const age = placedAt => {
+    const s = Math.max(0, Math.floor((Date.now() - Date.parse(placedAt + "Z")) / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+
+  box.innerHTML = `
+    <div class="st-lever" role="group" aria-label="Grill state">
+      ${["accepting", "paused", "closed"].map(s => `
+        <button class="st-state${st.state === s ? " on" : ""}" data-state="${s}">
+          ${s[0].toUpperCase() + s.slice(1)}
+        </button>`).join("")}
+    </div>
+    <p class="st-head">${st.open_app_orders
+      ? `${st.open_app_orders} online order${st.open_app_orders === 1 ? "" : "s"}`
+      : ""}
+      <span class="st-cap">max queued orders: <b>${st.app_cap}</b>
+        <button class="btn ghost small" data-cap="${st.app_cap - 1}"
+                ${st.app_cap <= 1 ? "disabled" : ""}>−</button>
+        <button class="btn ghost small" data-cap="${st.app_cap + 1}"
+                ${st.app_cap >= 10 ? "disabled" : ""}>+</button></span></p>
+    ${st.orders.length ? st.orders.map(o => {
+      const act = _STATION_ACT[o.status];
+      return `<div class="st-order">
+        <div class="st-order__main">
+          <span class="chip ${o.status === "ready" ? "veg" : "plain"}">${o.status}</span>
+          <span class="sname">${esc(o.main)}</span>
+          <span class="st-who">${esc(o.who || "")}</span>
+          <span class="st-age">${age(o.placed_at)}</span>
+        </div>
+        ${o.condiments.length
+          ? `<div class="st-conds">${esc(o.condiments.join(" · "))}</div>` : ""}
+        <div class="st-actions">
+          ${act ? `<button class="btn small" data-adv="${o.id}"
+                     data-to="${act[0]}">${act[1]}</button>` : ""}
+          <button class="textlink" data-scancel="${o.id}">(cancel order)</button>
+        </div>
+      </div>`;
+    }).join("")
+    : `<p class="board__empty">No online orders.</p>`}`;
+
+  const act = fn => async e => {
+    try { await fn(e); } catch (err) {  }
+    loadStation();
+  };
+  box.querySelectorAll("[data-state]").forEach(b =>
+    b.addEventListener("click", act(() => {
+
+      if (b.dataset.state === "closed"
+          && (state.station?.orders?.length ?? 0) > 0
+          && !window.confirm("Closing cancels ALL outstanding online orders "
+              + "and notifies those students that the grill had to close.\n\n"
+              + "Close the grill?")) return Promise.resolve();
+      return api("/grill/station", { method: "POST",
+        body: { location_id: state.hall, state: b.dataset.state } });
+    })));
+  box.querySelectorAll("[data-cap]").forEach(b =>
+    b.addEventListener("click", act(() => api("/grill/station", {
+      method: "POST",
+      body: { location_id: state.hall, app_cap: Number(b.dataset.cap) } }))));
+  box.querySelectorAll("[data-adv]").forEach(b =>
+    b.addEventListener("click", act(() => api(`/grill/orders/${b.dataset.adv}/advance`, {
+      method: "POST", body: { to: b.dataset.to } }))));
+  box.querySelectorAll("[data-scancel]").forEach(b =>
+    b.addEventListener("click", act(() => api(`/grill/orders/${b.dataset.scancel}`, {
+      method: "DELETE" }))));
+}
+
 async function loadBoard() {
   if (!state.user || state.user.affiliation !== "staff") return;
   if (!state.boardWired) {
     state.boardWired = true;
     $("#boardFilter").addEventListener("input", renderBoardItems);
+    $("#boardLock").addEventListener("click", async () => {
+      try { await api("/auth/kitchen", { method: "DELETE" }); } catch {  }
+      await loadMe();
+      loadBoard();
+    });
   }
   const hallName = $("#hall").selectedOptions[0]?.textContent || `hall ${state.hall}`;
   $("#boardContext").textContent = `${hallName} · ${MEALS[state.meal]}`;
-  $("#boardTv").href = `/display.html?hall=${state.hall}`;
+  $("#boardTv").href = `/display?hall=${state.hall}`;
+  $("#boardLock").hidden = !state.user?.kitchen;
   try {
     const data = await api(`/availability?location=${state.hall}`);
     state.boardMarks = new Map(data.marks.map(m => [m.recipe_id, m]));
@@ -607,6 +982,7 @@ async function loadBoard() {
   }
   renderBoard();
 }
+
 function boardMsg(text) {
   const el = $("#boardMsg");
   el.hidden = !text;
@@ -624,18 +1000,27 @@ async function boardAct(fn) {
 function renderBoard() {
   const marks = [...(state.boardMarks?.values() ?? [])];
   const mbox = $("#boardMarked");
-  mbox.innerHTML = marks.length ? marks.map(m => {
+
+  const locked = !state.user?.kitchen;
+  const dis = locked ? "disabled" : "";
+  const banner = locked
+    ? `<p class="board__lockednote">Viewing read-only — <a class="textlink"
+         href="/staffunlock?then=${encodeURIComponent("/?pane=availability")}"
+         >unlock kitchen actions</a> to mark and restock. One passcode entry is
+         good for 24 hours on this browser.</p>`
+    : "";
+  mbox.innerHTML = banner + (marks.length ? marks.map(m => {
     const name = m.name || state.items.get(m.recipe_id)?.name || `Dish ${m.recipe_id}`;
     return `<div class="bmark" data-id="${m.recipe_id}">
       <div class="bmark__row">
         <span class="chip ${m.status === "out" ? "plain" : "alg"}">${
           m.status === "out" ? "Out" : "Low"}</span>
         <span class="bmark__name">${esc(name)}</span>
-        <button class="btn ghost small" data-restock="${m.recipe_id}">Restock</button>
+        <button class="btn ghost small" ${dis} data-restock="${m.recipe_id}">Restock</button>
       </div>
       <div class="bmark__noterow">
         ${m.note ? `<span class="bmark__note">${esc(m.note)}</span>` : ""}
-        <button class="textlink" data-note="${m.recipe_id}">(${
+        <button class="textlink" ${dis} data-note="${m.recipe_id}">(${
           m.note ? "edit note" : "add note"})</button>
       </div>
       <div class="bmark__noteui" hidden>
@@ -649,7 +1034,7 @@ function renderBoard() {
         </div>
       </div>
     </div>`;
-  }).join("") : `<p class="board__empty">Nothing is marked — the line is fully stocked.</p>`;
+  }).join("") : `<p class="board__empty">Nothing is marked — the line is fully stocked.</p>`);
 
   mbox.querySelectorAll("[data-note]").forEach(b =>
     b.addEventListener("click", () => {
@@ -690,6 +1075,7 @@ function renderBoard() {
     b.addEventListener("click", () => boardAct(() =>
       api(`/availability?location=${state.hall}&recipe=${b.dataset.restock}`,
           { method: "DELETE" }))));
+
   renderBoardItems();
 }
 
@@ -708,11 +1094,12 @@ function renderBoardItems() {
       : "No menu is loaded — open the Menu pane and pick the hall and meal first."}</p>`;
     return;
   }
+  const dis = state.user?.kitchen ? "" : "disabled";
   box.innerHTML = shown.map(i => `
     <div class="brow">
       <span class="brow__name">${esc(i.name)}</span>
-      <button class="btn ghost small low" data-low="${i.id}">Mark as low</button>
-      <button class="btn ghost small" data-out="${i.id}">Mark as out</button>
+      <button class="btn ghost small low" ${dis} data-low="${i.id}">Mark as low</button>
+      <button class="btn ghost small" ${dis} data-out="${i.id}">Mark as out</button>
     </div>`).join("") + (all.length > shown.length
       ? `<p class="board__more">…and ${all.length - shown.length} more — type to find a dish.</p>`
       : "");
@@ -847,7 +1234,6 @@ async function submitRating(recipeId, score, btn) {
       ? "Session expired — sign in again." : `Couldn't save: ${e.message}`;
   }
 }
-
 function loadMenuRowChips(recipeId) {
   const row = document.querySelector(`.dish[data-id="${recipeId}"] .chips`);
   const it = state.items.get(recipeId);
@@ -900,6 +1286,7 @@ async function loadLine() {
     ]);
     state.line = now;
     renderLineCard();
+
     const series = typical.series;
     const peak = Math.max(...series.map(s => s.busyness), 0.01);
     const nowHM = new Date().toTimeString().slice(0, 5);
@@ -970,11 +1357,11 @@ async function loadInterhouse() {
         <div class="ih__why">${esc(labels[h.access])} — ${esc(h.reason)}</div>
       </div>
     </div>`).join("");
-
   const when = `${data.meal_name.toLowerCase()} on ${esc(data.weekday)}`;
   const who = isStaff
     ? `Access rules in force for ${when}, as they apply to a student from another House:`
     : `As a <b>${esc(data.viewer_house_name || data.viewer_house)}</b> resident, for ${when}:`;
+
   box.innerHTML = `
     <p style="margin:0 0 10px;font-size:13.5px;color:var(--ink-soft)">${who}</p>
     ${rows}
@@ -987,13 +1374,13 @@ async function loadInterhouse() {
     <p style="margin:12px 0 0;font-size:12.5px;color:var(--ink-mute)">${esc(data.caveat)}</p>`;
 
 }
+
 function rsvpQuestion() {
   const hall = $("#hall").selectedOptions[0]?.textContent || "here";
 
   const meal = (state.mealName || MEALS[state.meal] || "").toLowerCase();
   return `Eating at ${hall} for ${meal}?`;
 }
-
 function updateRsvpCopy() {
   renderRsvp();
 
@@ -1032,7 +1419,6 @@ function markRsvp(attending) {
   $("#yesBtn").setAttribute("aria-pressed", String(attending === true));
   $("#noBtn").setAttribute("aria-pressed", String(attending === false));
 }
-
 async function declare(attending) {
   if (!state.user) { signIn(); return; }
   try {
@@ -1112,7 +1498,6 @@ async function init() {
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && state.dish != null) closeSheet();
   });
-
   await loadMe();
   showPane(state.pane, { push: false });
   initPush();

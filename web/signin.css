@@ -176,3 +176,7 @@
 }
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+
+.fld__hint--err{font-weight:600; color:var(--ink-soft)}
+
+#unlockForm{margin-top:16px}

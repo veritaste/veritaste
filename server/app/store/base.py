@@ -235,3 +235,56 @@ class Store(ABC):
     @abstractmethod
     def stock_marks(self, location_id: int, marked_on: str) -> list[dict]:
         ...
+
+
+    @abstractmethod
+    def grill_station(self, location_id: int, default_cap: int) -> dict:
+        ...
+
+    @abstractmethod
+    def set_grill_station(self, location_id: int, default_cap: int,
+                          state: str | None = None,
+                          app_cap: int | None = None) -> dict:
+        ...
+
+    @abstractmethod
+    def grill_open_orders(self, location_id: int) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def grill_poll(self, location_id: int, default_cap: int) -> tuple[dict, list[dict]]:
+        ...
+
+    @abstractmethod
+    def open_app_count(self, location_id: int) -> int:
+        ...
+
+    @abstractmethod
+    def user_open_grill_order(self, user_id: str) -> dict | None:
+        ...
+
+    @abstractmethod
+    def place_grill_order(self, location_id: int, user_id: str, main_id: int,
+                          main_name: str, condiments_json: str,
+                          pickup_name: str) -> dict:
+        ...
+
+    @abstractmethod
+    def get_grill_order(self, order_id: int) -> dict | None: ...
+
+    @abstractmethod
+    def advance_grill_order(self, order_id: int, to: str) -> dict | None:
+        ...
+
+    @abstractmethod
+    def cancel_grill_order(self, order_id: int, reason: str,
+                           by_staff: bool) -> dict | None:
+        ...
+
+    @abstractmethod
+    def grill_cook_estimate_s(self, location_id: int, default_s: int) -> int:
+        ...
+
+    @abstractmethod
+    def grill_orders_containing(self, location_id: int, recipe_id: int) -> list[dict]:
+        ...

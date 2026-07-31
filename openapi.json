@@ -30,6 +30,80 @@
         ],
         "type": "object"
       },
+      "GrillAdvanceIn": {
+        "additionalProperties": false,
+        "properties": {
+          "to": {
+            "enum": [
+              "cooking",
+              "ready",
+              "collected"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "type": "object"
+      },
+      "GrillOrderIn": {
+        "additionalProperties": false,
+        "properties": {
+          "condiments": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "location_id": {
+            "type": "integer"
+          },
+          "main_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "location_id",
+          "main_id"
+        ],
+        "type": "object"
+      },
+      "GrillStationIn": {
+        "additionalProperties": false,
+        "properties": {
+          "app_cap": {
+            "default": null,
+            "maximum": 10,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "location_id": {
+            "type": "integer"
+          },
+          "state": {
+            "default": null,
+            "enum": [
+              "accepting",
+              "paused",
+              "closed",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "location_id"
+        ],
+        "type": "object"
+      },
       "HTTPError": {
         "properties": {
           "detail": {
@@ -39,6 +113,19 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "KitchenIn": {
+        "additionalProperties": false,
+        "properties": {
+          "passcode": {
+            "maxLength": 200,
+            "type": "string"
+          }
+        },
+        "required": [
+          "passcode"
+        ],
         "type": "object"
       },
       "PushSubIn": {
@@ -335,6 +422,61 @@
         ]
       }
     },
+    "/api/v1/auth/kitchen": {
+      "delete": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          }
+        },
+        "summary": "Lock kitchen actions on this browser",
+        "tags": [
+          "auth"
+        ]
+      },
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KitchenIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Unlock kitchen actions on this browser for 24 hours",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/v1/auth/signout": {
       "post": {
         "parameters": [],
@@ -469,6 +611,251 @@
         "summary": "Mark a dish low or out at a hall (staff)",
         "tags": [
           "availability"
+        ]
+      }
+    },
+    "/api/v1/grill": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Grill station state and orderable items",
+        "tags": [
+          "grill"
+        ]
+      }
+    },
+    "/api/v1/grill/orders": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrillOrderIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Order from the grill (requires sign-in)",
+        "tags": [
+          "grill"
+        ]
+      }
+    },
+    "/api/v1/grill/orders/{order_id}": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "summary": "Cancel a grill order (before cooking)",
+        "tags": [
+          "grill"
+        ]
+      }
+    },
+    "/api/v1/grill/orders/{order_id}/advance": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "order_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrillAdvanceIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Advance an order one step (staff)",
+        "tags": [
+          "grill"
+        ]
+      }
+    },
+    "/api/v1/grill/station": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Station queue \u2014 the poll IS the heartbeat (staff)",
+        "tags": [
+          "grill"
+        ]
+      },
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrillStationIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Set grill state and walk-up headroom (staff)",
+        "tags": [
+          "grill"
         ]
       }
     },

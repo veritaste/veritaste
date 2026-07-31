@@ -47,7 +47,7 @@ async function hallName() {
     const here = locations.find(l => l.id === HALL);
     const name = here ? here.name : `Hall ${HALL}`;
     $("#hall").textContent = name;
-    document.title = `Veritaste — ${name}`;
+    document.title = `Kitchen Display · ${name} — Veritaste`;
   } catch {
     $("#hall").textContent = `Hall ${HALL}`;
   }
@@ -106,6 +106,30 @@ async function refreshServiceContext() {
   renderDemand();
 }
 
+let lastGrill = null;
+
+function renderGrillTile() {
+  const box = $("#grilltile");
+  if (!lastGrill) { box.hidden = true; return; }
+  box.hidden = false;
+  const g = lastGrill;
+  let line, sub = "";
+  if (g.state === "closed") {
+    line = "Closed to online orders";
+  } else if (!g.station_online) {
+    line = "Screen offline — ordering paused";
+  } else if (g.state === "paused") {
+    line = "Paused — queue cooking out";
+    sub = `${g.open_app_orders} in the queue`;
+  } else {
+    line = "Accepting online orders";
+    sub = `${g.open_app_orders} queued · about ${g.estimated_wait_min} min`;
+  }
+  box.innerHTML = `<div class="tile__label">Grill</div>
+    <div class="gline">${line}</div>
+    ${sub ? `<div class="gsub">${sub}</div>` : ""}`;
+}
+
 async function refresh() {
   try {
     const data = await fetchJson(`/api/v1/availability?location=${HALL}`);
@@ -122,6 +146,10 @@ async function refresh() {
       `/api/v1/attendance?location=${HALL}&meal=${currentMeal()}`);
   } catch {  }
   renderDemand();
+  try {
+    lastGrill = await fetchJson(`/api/v1/grill?location=${HALL}`);
+  } catch {  }
+  renderGrillTile();
 }
 
 function tickClock() {

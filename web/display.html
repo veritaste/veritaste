@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Veritaste — Kitchen Display</title>
+<title>Kitchen Display — Veritaste</title>
 <link rel="stylesheet" href="/display.css">
 </head>
 <body>
 <header>
   <div class="brand"><span class="brand__veri">VERI</span><span class="brand__taste">TASTE</span></div>
-  <div class="title">Availability · <span id="hall">…</span></div>
+  <div class="title">Kitchen Display · <span id="hall">…</span></div>
   <div class="clock" id="clock" aria-hidden="true"></div>
 </header>
 
@@ -19,7 +19,10 @@
 
 <main>
   <section id="list" aria-live="polite"></section>
-  <aside id="demand" hidden></aside>
+  <aside class="rail">
+    <div id="demand" hidden></div>
+    <div id="grilltile" hidden></div>
+  </aside>
 </main>
 
 <div class="mark86" aria-hidden="true">86</div>

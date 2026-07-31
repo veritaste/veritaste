@@ -2,20 +2,32 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import hashlib
+import hmac
+import json
 import logging
 import os
 import secrets
 import sys
+import time
 
 from apiflask import APIFlask, Schema, abort
-from apiflask.fields import Boolean, Integer, String
+from apiflask.fields import Boolean, Integer, List, String
 from apiflask.validators import Length, OneOf, Range
 from flask import current_app, g, jsonify, request, send_from_directory
 
 from . import __version__, push, reports
-from .auth import SESSION_COOKIE, User, current_user, issue_session, login_required
-from .config import (CACHE_TTL_HOURS, DB_PATH, DEMO_MODE, ECS_APIKEY, LOCAL_TZ,
-                     MODE, RATING_RECENT_DAYS, STORE_BACKEND, TIMEZONE, WEB_DIR)
+from .auth import (KITCHEN_COOKIE, KITCHEN_TTL_S, SESSION_COOKIE, User,
+                   current_user, issue_kitchen, issue_session,
+                   kitchen_unlocked, login_required)
+from .config import (CACHE_TTL_HOURS, DB_PATH, DEMO_MODE, ECS_APIKEY,
+                     GRILL_APP_CAP_DEFAULT, GRILL_COOK_S_DEFAULT,
+                     GRILL_HEARTBEAT_STALE_S, GRILL_LAST_CALL_MIN,
+                     GRILL_WAIT_CAP_MIN, LOCAL_TZ,
+                     MODE, RATING_RECENT_DAYS, STAFF_PASSCODE, STORE_BACKEND,
+                     TIMEZONE, UNLOCK_WINDOW_S, WEB_DIR)
+from .reference.grill import GRILL_CATEGORY, condiment_ids_for, split_grill
+from .reference.meals import service_ends_at
 from .rewards import (DAILY_CAP_CENTS, DAY_SCOPED, GRANTS, LABELS,
                       format_cents, settlement_note)
 from .reference import (ANNENBERG_LOCATION, BY_KEY, BY_NETID, HOUSES,
@@ -102,6 +114,32 @@ class StockIn(Schema):
 class StockClearQuery(Schema):
     location = Integer(required=True)
     recipe = Integer(required=True)
+
+
+class KitchenIn(Schema):
+    passcode = String(required=True, validate=Length(max=200))
+
+
+class GrillQuery(Schema):
+    location = Integer(required=True)
+
+
+class GrillOrderIn(Schema):
+    location_id = Integer(required=True)
+    main_id = Integer(required=True)
+    condiments = List(Integer(), load_default=[])
+
+
+class GrillStationIn(Schema):
+    location_id = Integer(required=True)
+    state = String(load_default=None, allow_none=True,
+                   validate=OneOf(["accepting", "paused", "closed"]))
+    app_cap = Integer(load_default=None, allow_none=True,
+                      validate=Range(min=1, max=10))
+
+
+class GrillAdvanceIn(Schema):
+    to = String(required=True, validate=OneOf(["cooking", "ready", "collected"]))
 
 
 class RatingsReportQuery(Schema):
@@ -264,9 +302,90 @@ def staff_required(view):
             abort(401, "Sign in to use kitchen tools.")
         if user.affiliation != "staff":
             abort(403, "Kitchen tools are staff-only.")
+        if user.demo and not kitchen_unlocked():
+            abort(403, "Kitchen actions are locked on this browser. "
+                       "Unlock with the kitchen passcode.")
         return view(*args, **kwargs)
 
     return wrapper
+
+
+_unlock_gate = {"t": -1e9}
+
+
+def _grill_serving_meal(location: int) -> int | None:
+    now = dt.datetime.now(LOCAL_TZ)
+    for meal in (0, 1, 2):
+        if service_status(location, now.date(), meal, LOCAL_TZ, now) == "serving":
+            return meal
+    return 2 if DEMO_MODE else None
+
+
+_ORDER_MSG = {
+    "placed": "Order placed — not yet seen by the grill.",
+    "seen": "The grill has your order.",
+    "cooking": "Your meal is being prepared — head to the grill to get it fresh.",
+    "ready": "Your meal is ready for pickup.",
+    "collected": "Collected — enjoy.",
+    "cancelled": "This order was cancelled.",
+}
+
+MSG_ORDER_IN_PROGRESS = "You already have a grill order in progress."
+
+MSG_GRILL_CLOSED = ("The grill had to close and your order was cancelled — "
+                    "come to the dining hall to order in person.")
+
+MSG_GRILL_NOT_PERMITTED = ("Interhouse rules don't allow you to dine here "
+                           "for this meal, so the grill can't take your order.")
+
+_DINE_OK = frozenset({"open", "unknown"})
+
+
+def _may_dine(user: User, location: int, meal: int) -> tuple[bool, str | None]:
+    if user.affiliation == "staff" or not user.house_key:
+        return True, None
+    on = dt.datetime.now(LOCAL_TZ).date()
+    for v in where_can_i_eat(meal, on, user.house_key):
+        if v.location_id == location:
+            if v.access.value in _DINE_OK:
+                return True, None
+            return False, v.reason
+    return True, None
+
+_GRILL_REFUSALS = {
+    "not_serving": (400, "This hall is not serving right now, so the "
+                         "grill is not taking orders."),
+    "closed": (409, "The grill is closed to app orders right now."),
+    "paused": (409, "The grill has paused online orders — you can order "
+                    "in person at the counter."),
+    "station_offline": (409, "The grill isn't taking online orders right now."),
+    "walk_up": (409, "The grill is taking orders in person right now — "
+                     "come down and order at the counter."),
+    "wait_cap": (409, "The grill is backed up with online orders — "
+                      "come down and order at the counter."),
+}
+
+
+def _pickup_name(full: str) -> str:
+    parts = (full or "").split()
+    if not parts:
+        return "Student"
+    if len(parts) == 1:
+        return parts[0]
+    return f"{parts[0]} {parts[-1][0]}."
+
+
+def _order_view(o: dict) -> dict:
+    return {
+        "id": o["id"], "status": o["status"],
+        "location_id": o["location_id"],
+        "main": {"id": o["main_id"], "name": o["main_name"]},
+        "condiments": json.loads(o["condiments"]),
+        "message": _ORDER_MSG.get(o["status"]),
+        "cancellable": o["status"] in ("placed", "seen"),
+        "placed_at": o["placed_at"],
+        "cancel_reason": o["cancel_reason"],
+    }
 
 
 def report_key_required(view):
@@ -658,7 +777,40 @@ def _register(app: APIFlask) -> None:
             "house_name": BY_KEY[user.house_key].name
                           if user.house_key in BY_KEY else None,
             "demo": user.demo,
+            "kitchen": kitchen_unlocked(),
         }
+
+    @app.post(f"{API}/auth/kitchen")
+    @app.input(KitchenIn)
+    @app.doc(tags=["auth"],
+             summary="Unlock kitchen actions on this browser for 24 hours")
+    def kitchen_unlock(json_data):
+        if not STAFF_PASSCODE:
+            abort(503, "Staff access is not configured on this server.")
+        now = time.monotonic()
+        wait = UNLOCK_WINDOW_S - (now - _unlock_gate["t"])
+        if wait > 0:
+            abort(429, f"One attempt every {UNLOCK_WINDOW_S} seconds — "
+                       f"try again in {int(wait) + 1}s.")
+        _unlock_gate["t"] = now
+        supplied = hashlib.sha256(json_data["passcode"].encode()).digest()
+        expected = hashlib.sha256(STAFF_PASSCODE.encode()).digest()
+        if not hmac.compare_digest(supplied, expected):
+            time.sleep(0.3)
+            abort(401, "That is not the kitchen passcode.")
+        resp = jsonify({"unlocked": True, "hours": KITCHEN_TTL_S // 3600})
+        resp.set_cookie(
+            KITCHEN_COOKIE, issue_kitchen(), max_age=KITCHEN_TTL_S,
+            httponly=True, samesite="Lax", secure=request.is_secure, path="/",
+        )
+        return resp
+
+    @app.delete(f"{API}/auth/kitchen")
+    @app.doc(tags=["auth"], summary="Lock kitchen actions on this browser")
+    def kitchen_lock():
+        resp = jsonify({"unlocked": False})
+        resp.delete_cookie(KITCHEN_COOKIE, path="/")
+        return resp
 
     @app.get(f"{API}/auth/accounts")
     @app.doc(tags=["auth"], summary="Selectable demonstration identities")
@@ -830,11 +982,25 @@ def _register(app: APIFlask) -> None:
              summary="Mark a dish low or out at a hall (staff)")
     def set_availability(json_data):
         svc = _svc()
+        location, rid = json_data["location_id"], json_data["recipe_id"]
         svc.store.set_stock(
-            json_data["location_id"], json_data["recipe_id"],
-            json_data["status"], json_data.get("note"),
+            location, rid, json_data["status"], json_data.get("note"),
             current_user().sub, _today(),
         )
+        if json_data["status"] == "out":
+            affected = svc.store.grill_orders_containing(location, rid)
+            if affected:
+                rec = svc.dining.recipes([rid]).get(rid) or {}
+                name = rec.get("name") or "An item in your grill order"
+                for o in affected:
+                    if o["status"] in ("placed", "seen"):
+                        _notify_user(svc, o["user_id"],
+                                     f"{name} ran out — you can cancel your "
+                                     "grill order if you'd rather.")
+                    else:
+                        _notify_user(svc, o["user_id"],
+                                     f"{name} ran out — your order is "
+                                     "already on the grill.")
         return {"ok": True, "status": json_data["status"],
                 "recipe_id": json_data["recipe_id"]}
 
@@ -848,6 +1014,300 @@ def _register(app: APIFlask) -> None:
             query_data["location"], query_data["recipe"], current_user().sub,
         )
         return {"cleared": cleared}
+
+
+    def _notify_user(svc, user_id: str, body: str, url: str = "/") -> None:
+        for sub in svc.store.push_subs(user_id=user_id):
+            ok, status, _reason = push.send(
+                sub.as_subscription_info(), "Veritaste", body, url)
+            if status in push.DEAD_STATUSES:
+                svc.store.delete_push_sub(sub.endpoint)
+
+    def _grill_items(svc, location: int, meal: int) -> list[dict]:
+        date = _today()
+        day, _status = svc.dining.day_rows(date, location)
+        categories = {c["id"]: c["name"] for c in svc.dining.categories()}
+        grill_rows = [
+            r for r in day
+            if r.get("meal") == meal
+            and (categories.get(r.get("category"), "").strip().lower()
+                 == GRILL_CATEGORY)
+        ]
+        ids = sorted({r["recipe"] for r in grill_rows})
+        recipes = svc.dining.recipes(ids)
+        ratings = svc.store.rating_summary(ids, location, RATING_RECENT_DAYS)
+        consumption = svc.store.consumption_signals(ids)
+        stock = {m["recipe_id"]: {"status": m["status"], "note": m["note"]}
+                 for m in svc.store.stock_marks(location, date)}
+        items = []
+        for rid in ids:
+            if rid not in recipes:
+                continue
+            item = _item(recipes[rid], ratings.get(rid), consumption.get(rid),
+                         stock.get(rid))
+            item["out"] = (stock.get(rid) or {}).get("status") == "out"
+            items.append(item)
+        return items
+
+    def _close_grill(svc, location: int) -> dict:
+        for o in svc.store.grill_open_orders(location):
+            if svc.store.cancel_grill_order(o["id"], "closed", by_staff=True):
+                _notify_user(svc, o["user_id"], MSG_GRILL_CLOSED)
+        return svc.store.set_grill_station(
+            location, GRILL_APP_CAP_DEFAULT, state="closed")
+
+    def _shift_gate(svc, location: int, station: dict) -> dict:
+        meal = _grill_serving_meal(location)
+        now = dt.datetime.now(LOCAL_TZ)
+        touched = dt.datetime.fromisoformat(
+            station["updated_at"]).replace(tzinfo=dt.timezone.utc)
+
+        if meal is not None:
+            end = service_ends_at(location, now.date(), meal, LOCAL_TZ)
+            if (end is not None and station["state"] == "accepting"):
+                threshold = end - dt.timedelta(minutes=GRILL_LAST_CALL_MIN)
+                if now >= threshold and touched < threshold:
+                    return svc.store.set_grill_station(
+                        location, GRILL_APP_CAP_DEFAULT, state="paused")
+            return station
+
+        if station["state"] == "closed":
+            return station
+        remaining = []
+        for o in svc.store.grill_open_orders(location):
+            if o["status"] in ("placed", "seen"):
+                if svc.store.cancel_grill_order(o["id"], "closed", by_staff=True):
+                    _notify_user(svc, o["user_id"], MSG_GRILL_CLOSED)
+            else:
+                remaining.append(o)
+        if remaining:
+            if station["state"] != "paused":
+                station = svc.store.set_grill_station(
+                    location, GRILL_APP_CAP_DEFAULT, state="paused")
+            return station
+        return svc.store.set_grill_station(
+            location, GRILL_APP_CAP_DEFAULT, state="closed")
+
+    def _grill_items_for_service(svc, location: int, meal: int | None) -> list[dict]:
+        if meal is None:
+            return []
+        items = _grill_items(svc, location, meal)
+        if DEMO_MODE and not items and meal != 2:
+            items = _grill_items(svc, location, 2)
+        return items
+
+    def _grill_snapshot(svc, location: int):
+        station = _shift_gate(
+            svc, location, svc.store.grill_station(location, GRILL_APP_CAP_DEFAULT))
+        open_count = svc.store.open_app_count(location)
+        est_s = svc.store.grill_cook_estimate_s(location, GRILL_COOK_S_DEFAULT)
+        wait_min = round(open_count * est_s / 60)
+
+        online = False
+        if station["heartbeat_at"]:
+            age = (dt.datetime.utcnow()
+                   - dt.datetime.fromisoformat(station["heartbeat_at"])
+                   ).total_seconds()
+            online = age <= GRILL_HEARTBEAT_STALE_S
+
+        meal = _grill_serving_meal(location)
+        reasons = []
+        if meal is None:
+            reasons.append("not_serving")
+        if station["state"] == "closed":
+            reasons.append("closed")
+        if station["state"] == "paused":
+            reasons.append("paused")
+        if not online:
+            reasons.append("station_offline")
+        if open_count >= station["app_cap"]:
+            reasons.append("walk_up")
+        if wait_min > GRILL_WAIT_CAP_MIN:
+            reasons.append("wait_cap")
+
+        return station, meal, {
+            "state": station["state"],
+            "accepting_now": not reasons,
+            "why_not": reasons or None,
+            "station_online": online,
+            "open_app_orders": open_count,
+            "app_cap": station["app_cap"],
+            "estimated_wait_min": wait_min,
+            "wait_cap_min": GRILL_WAIT_CAP_MIN,
+        }
+
+
+    @app.get(f"{API}/grill")
+    @app.input(GrillQuery, location="query")
+    @app.doc(tags=["grill"], summary="Grill station state and orderable items")
+    def grill_state(query_data):
+        svc = _svc()
+        location = query_data["location"]
+        _station, meal, snap = _grill_snapshot(svc, location)
+        items = _grill_items_for_service(svc, location, meal)
+        mains, condiments = split_grill(items)
+        for m in mains:
+            m["condiments"] = condiment_ids_for(m["name"], condiments)
+        user = current_user()
+        mine = svc.store.user_open_grill_order(user.sub) if user else None
+        walk_up = "walk_up" in (snap["why_not"] or [])
+
+        dining_allowed, dining_reason = (None, None)
+        if user is not None and meal is not None:
+            dining_allowed, dining_reason = _may_dine(user, location, meal)
+
+        next_service_min = None
+        if meal is None:
+            now = dt.datetime.now(LOCAL_TZ)
+            starts = [declaration_closes_at(location, now.date(), m, LOCAL_TZ)
+                      for m in (0, 1, 2)]
+            coming = [s for s in starts if s > now]
+            if coming:
+                next_service_min = max(
+                    0, int((min(coming) - now).total_seconds() // 60))
+
+        return {
+            "location": location, **snap,
+            "next_service_min": next_service_min,
+            "dining_allowed": dining_allowed,
+            "dining_reason": dining_reason,
+            "walk_up_message": _GRILL_REFUSALS["walk_up"][1] if walk_up else None,
+            "mains": mains, "condiments": condiments,
+            "your_order": _order_view(mine) if mine else None,
+        }
+
+    @app.post(f"{API}/grill/orders")
+    @app.input(GrillOrderIn)
+    @login_required
+    @app.doc(tags=["grill"], summary="Order from the grill (requires sign-in)")
+    def place_grill(json_data):
+        svc = _svc()
+        user = current_user()
+        location = json_data["location_id"]
+
+        _station, meal, snap = _grill_snapshot(svc, location)
+        for reason in snap["why_not"] or []:
+            code, message = _GRILL_REFUSALS[reason]
+            abort(code, message)
+
+        allowed, _why = _may_dine(user, location, meal)
+        if not allowed:
+            abort(403, MSG_GRILL_NOT_PERMITTED)
+
+        if svc.store.user_open_grill_order(user.sub):
+            abort(409, MSG_ORDER_IN_PROGRESS)
+
+        items = {i["id"]: i
+                 for i in _grill_items_for_service(svc, location, meal)}
+        main = items.get(json_data["main_id"])
+        if main is None or not split_grill([main])[0]:
+            abort(422, "That item is not a grill main on today's menu here.")
+        all_condiments = split_grill(list(items.values()))[1]
+        applicable = set(condiment_ids_for(main["name"], all_condiments))
+        chosen = []
+        for cid in json_data["condiments"]:
+            cond = items.get(cid)
+            if cond is None or split_grill([cond])[0]:
+                abort(422, "One of those condiments is not on the grill today.")
+            if cid not in applicable:
+                abort(422, f"{cond['name']} isn't offered with {main['name']}.")
+            chosen.append(cond)
+        for item in [main, *chosen]:
+            if item["out"]:
+                abort(409, f"{item['name']} ran out — adjust your order.")
+
+        order = svc.store.place_grill_order(
+            location, user.sub, main["id"], main["name"],
+            json.dumps([{"id": c["id"], "name": c["name"]} for c in chosen]),
+            _pickup_name(user.name),
+        )
+        return _order_view(order)
+
+    @app.delete(f"{API}/grill/orders/<int:order_id>")
+    @login_required
+    @app.doc(tags=["grill"], summary="Cancel a grill order (before cooking)")
+    def cancel_grill(order_id: int):
+        svc = _svc()
+        user = current_user()
+        order = svc.store.get_grill_order(order_id)
+        if order is None:
+            abort(404, "No such order.")
+        staff_acting = (user.affiliation == "staff"
+                        and (not user.demo or kitchen_unlocked()))
+        if order["user_id"] != user.sub and not staff_acting:
+            abort(403, "Not your order.")
+        cancelled = svc.store.cancel_grill_order(
+            order_id, "staff" if staff_acting and order["user_id"] != user.sub
+            else "student", by_staff=staff_acting)
+        if cancelled is None:
+            abort(409, "Cooking has already started — this order can no "
+                       "longer be cancelled.")
+        return _order_view(cancelled)
+
+    @app.get(f"{API}/grill/station")
+    @staff_required
+    @app.input(GrillQuery, location="query")
+    @app.doc(tags=["grill"],
+             summary="Station queue — the poll IS the heartbeat (staff)")
+    def grill_station_poll(query_data):
+        svc = _svc()
+        location = query_data["location"]
+        _shift_gate(svc, location,
+                    svc.store.grill_station(location, GRILL_APP_CAP_DEFAULT))
+        station, orders = svc.store.grill_poll(location, GRILL_APP_CAP_DEFAULT)
+        open_count = sum(1 for o in orders
+                         if o["status"] in ("seen", "cooking"))
+        return {
+            "location": location,
+            "state": station["state"],
+            "app_cap": station["app_cap"],
+            "open_app_orders": open_count,
+            "headroom": max(0, station["app_cap"] - open_count),
+            "orders": [{
+                "id": o["id"], "status": o["status"],
+                "who": o["pickup_name"],
+                "main": o["main_name"],
+                "condiments": [c["name"] for c in json.loads(o["condiments"])],
+                "placed_at": o["placed_at"],
+            } for o in orders],
+        }
+
+    @app.post(f"{API}/grill/station")
+    @staff_required
+    @app.input(GrillStationIn)
+    @app.doc(tags=["grill"],
+             summary="Set grill state and walk-up headroom (staff)")
+    def grill_station_set(json_data):
+        svc = _svc()
+        location = json_data["location_id"]
+        if json_data.get("state") == "closed":
+            station = _close_grill(svc, location)
+            if json_data.get("app_cap") is not None:
+                station = svc.store.set_grill_station(
+                    location, GRILL_APP_CAP_DEFAULT,
+                    app_cap=json_data["app_cap"])
+        else:
+            station = svc.store.set_grill_station(
+                location, GRILL_APP_CAP_DEFAULT,
+                state=json_data.get("state"), app_cap=json_data.get("app_cap"),
+            )
+        return {"location": station["location_id"], "state": station["state"],
+                "app_cap": station["app_cap"]}
+
+    @app.post(f"{API}/grill/orders/<int:order_id>/advance")
+    @staff_required
+    @app.input(GrillAdvanceIn)
+    @app.doc(tags=["grill"], summary="Advance an order one step (staff)")
+    def grill_advance(order_id: int, json_data):
+        svc = _svc()
+        order = svc.store.advance_grill_order(order_id, json_data["to"])
+        if order is None:
+            abort(409, "That step is not available for this order.")
+        if order["status"] == "cooking":
+            _notify_user(svc, order["user_id"], _ORDER_MSG["cooking"])
+        elif order["status"] == "ready":
+            _notify_user(svc, order["user_id"], _ORDER_MSG["ready"])
+        return _order_view(order)
 
 
     def _report_payload(kind: str, rows: list[dict], columns: list[str],
@@ -969,6 +1429,21 @@ def _register(app: APIFlask) -> None:
     @app.doc(hide=True)
     def index():
         return send_from_directory(WEB_DIR, "index.html")
+
+    @app.get("/signin")
+    @app.doc(hide=True)
+    def signin_page():
+        return send_from_directory(WEB_DIR, "signin.html")
+
+    @app.get("/display")
+    @app.doc(hide=True)
+    def display_page():
+        return send_from_directory(WEB_DIR, "display.html")
+
+    @app.get("/staffunlock")
+    @app.doc(hide=True)
+    def staffunlock_page():
+        return send_from_directory(WEB_DIR, "staffunlock.html")
 
 
 app = create_app()

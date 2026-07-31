@@ -137,6 +137,17 @@
 
 </section>
 
+<section class="pane" id="pane-grill" hidden>
+  <div class="card">
+    <div class="card__hd"><h2>Order the Grill</h2>
+      <label class="hd-label" for="grillHall">Dining hall</label>
+      <select class="st-hall" id="grillHall"></select></div>
+    <div class="card__bd" id="grillBody">
+      <div class="state" style="padding:20px 0">Loading the grill…</div>
+    </div>
+  </div>
+</section>
+
 <section class="pane" id="pane-where" hidden>
   <div class="card">
     <div class="card__hd"><h2 id="whereTitle">Where can I eat?</h2></div>
@@ -151,8 +162,9 @@
     <div class="board86" aria-hidden="true">86</div>
     <div class="card__hd"><h2>Availability Board</h2>
       <span class="board__ctx" id="boardContext"></span>
-      <a class="textlink" id="boardTv" href="/display.html" target="_blank"
-         rel="noopener">(kitchen display)</a></div>
+      <a class="textlink" id="boardTv" href="/display" target="_blank"
+         rel="noopener">(kitchen display)</a>
+      <button class="textlink" id="boardLock" hidden>(lock kitchen)</button></div>
     <div class="card__bd">
       <p class="board__lead">Mark what the line has run out of — students see it
         on the menu the moment you tap. A mark lasts until you restock it or the
@@ -163,6 +175,17 @@
       <input id="boardFilter" type="search" placeholder="Find a dish…"
              autocomplete="off" aria-label="Filter dishes">
       <div id="boardItems"></div>
+    </div>
+  </div>
+</section>
+
+<section class="pane" id="pane-station" hidden>
+  <div class="card station">
+    <div class="card__hd"><h2>Grill Station</h2>
+      <label class="hd-label" for="stationHall">Dining hall</label>
+      <select class="st-hall" id="stationHall"></select></div>
+    <div class="card__bd" id="stationBody">
+      <div class="state" style="padding:20px 0">Loading the station…</div>
     </div>
   </div>
 </section>

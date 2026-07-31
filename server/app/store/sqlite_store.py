@@ -158,6 +158,44 @@ CREATE TABLE IF NOT EXISTS stock_event (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_event
     ON stock_event(location_id, created_at);
+
+-- One grill station per hall. `state` is the staff lever (accepting,
+-- backed_up, closed); the heartbeat is stamped by every station poll and is
+-- what the dead-man's switch reads. A station that has never polled is
+-- indistinguishable from a dead screen, which is exactly right: plugging the
+-- tablet in IS what opens ordering.
+CREATE TABLE IF NOT EXISTS grill_station (
+    location_id  INTEGER PRIMARY KEY,
+    state        TEXT    NOT NULL CHECK (state IN ('accepting','paused','closed')),
+    app_cap      INTEGER NOT NULL,
+    heartbeat_at TEXT,
+    updated_at   TEXT    NOT NULL
+);
+
+-- Grill orders: one main plus condiments, both live menu items. The status
+-- ladder is placed -> seen -> cooking -> ready -> collected, with cancelled a
+-- terminal branch; each rung stamps its own column so the record doubles as a
+-- timing dataset (cooking->ready spans feed the wait estimate).
+CREATE TABLE IF NOT EXISTS grill_order (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id   INTEGER NOT NULL,
+    user_id       TEXT    NOT NULL,
+    pickup_name   TEXT,
+    main_id       INTEGER NOT NULL,
+    main_name     TEXT    NOT NULL,
+    condiments    TEXT    NOT NULL,
+    status        TEXT    NOT NULL CHECK
+        (status IN ('placed','seen','cooking','ready','collected','cancelled')),
+    placed_at     TEXT    NOT NULL,
+    seen_at       TEXT,
+    cooking_at    TEXT,
+    ready_at      TEXT,
+    collected_at  TEXT,
+    cancelled_at  TEXT,
+    cancel_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_grill_open ON grill_order(location_id, status);
+CREATE INDEX IF NOT EXISTS idx_grill_user ON grill_order(user_id, status);
 """
 
 
@@ -191,7 +229,13 @@ class SqliteStore(Store):
     def init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._ensure_column("grill_order", "pickup_name", "TEXT")
             self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, decl: str) -> None:
+        cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         conn = getattr(self._local, "conn", None)
@@ -700,6 +744,175 @@ class SqliteStore(Store):
             "WHERE location_id = ? AND marked_on = ? "
             "ORDER BY marked_at DESC",
             (location_id, marked_on),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+    def grill_station(self, location_id: int, default_cap: int) -> dict:
+        row = self._conn.execute(
+            "SELECT location_id, state, app_cap, heartbeat_at, updated_at "
+            "FROM grill_station WHERE location_id = ?", (location_id,),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO grill_station "
+                "(location_id, state, app_cap, heartbeat_at, updated_at) "
+                "VALUES (?, 'accepting', ?, NULL, ?)",
+                (location_id, default_cap, now),
+            )
+            self._conn.commit()
+        return self.grill_station(location_id, default_cap)
+
+    def set_grill_station(self, location_id: int, default_cap: int,
+                          state: str | None = None,
+                          app_cap: int | None = None) -> dict:
+        self.grill_station(location_id, default_cap)
+        sets, params = ["updated_at = ?"], [datetime.utcnow().isoformat()]
+        if state is not None:
+            sets.append("state = ?")
+            params.append(state)
+        if app_cap is not None:
+            sets.append("app_cap = ?")
+            params.append(app_cap)
+        params.append(location_id)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE grill_station SET {', '.join(sets)} "
+                "WHERE location_id = ?", params,
+            )
+            self._conn.commit()
+        return self.grill_station(location_id, default_cap)
+
+    def grill_poll(self, location_id: int, default_cap: int) -> tuple[dict, list[dict]]:
+        now = datetime.utcnow().isoformat()
+        self.grill_station(location_id, default_cap)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE grill_station SET heartbeat_at = ? WHERE location_id = ?",
+                (now, location_id),
+            )
+            self._conn.execute(
+                "UPDATE grill_order SET status = 'seen', seen_at = ? "
+                "WHERE location_id = ? AND status = 'placed'",
+                (now, location_id),
+            )
+            self._conn.commit()
+        orders = self._conn.execute(
+            "SELECT * FROM grill_order WHERE location_id = ? "
+            "AND status IN ('seen','cooking','ready') "
+            "ORDER BY placed_at, id", (location_id,),
+        ).fetchall()
+        return self.grill_station(location_id, default_cap), [dict(r) for r in orders]
+
+    def grill_open_orders(self, location_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM grill_order WHERE location_id = ? "
+            "AND status IN ('placed','seen','cooking','ready') "
+            "ORDER BY placed_at, id", (location_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def open_app_count(self, location_id: int) -> int:
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM grill_order WHERE location_id = ? "
+            "AND status IN ('placed','seen','cooking')", (location_id,),
+        ).fetchone()[0]
+
+    def user_open_grill_order(self, user_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM grill_order WHERE user_id = ? "
+            "AND status IN ('placed','seen','cooking','ready') "
+            "ORDER BY id DESC LIMIT 1", (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def place_grill_order(self, location_id: int, user_id: str, main_id: int,
+                          main_name: str, condiments_json: str,
+                          pickup_name: str) -> dict:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO grill_order (location_id, user_id, pickup_name, "
+                "main_id, main_name, condiments, status, placed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'placed', ?)",
+                (location_id, user_id, pickup_name, main_id, main_name,
+                 condiments_json, now),
+            )
+            self._conn.commit()
+        return dict(self._conn.execute(
+            "SELECT * FROM grill_order WHERE id = ?", (cur.lastrowid,)
+        ).fetchone())
+
+    def get_grill_order(self, order_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM grill_order WHERE id = ?", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+    _GRILL_ADVANCES = {
+        "cooking": ("placed", "seen"),
+        "ready": ("cooking",),
+        "collected": ("ready",),
+    }
+
+    def advance_grill_order(self, order_id: int, to: str) -> dict | None:
+        allowed = self._GRILL_ADVANCES.get(to)
+        if not allowed:
+            return None
+        assert to.isidentifier()
+        now = datetime.utcnow().isoformat()
+        marks = ",".join("?" * len(allowed))
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE grill_order SET status = ?, {to}_at = ? "
+                f"WHERE id = ? AND status IN ({marks})",
+                (to, now, order_id, *allowed),
+            )
+            self._conn.commit()
+        if cur.rowcount != 1:
+            return None
+        return self.get_grill_order(order_id)
+
+    def cancel_grill_order(self, order_id: int, reason: str,
+                           by_staff: bool) -> dict | None:
+        allowed = ("placed", "seen", "cooking", "ready") if by_staff \
+            else ("placed", "seen")
+        marks = ",".join("?" * len(allowed))
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE grill_order SET status = 'cancelled', "
+                f"cancelled_at = ?, cancel_reason = ? "
+                f"WHERE id = ? AND status IN ({marks})",
+                (datetime.utcnow().isoformat(), reason, order_id, *allowed),
+            )
+            self._conn.commit()
+        if cur.rowcount != 1:
+            return None
+        return self.get_grill_order(order_id)
+
+    def grill_cook_estimate_s(self, location_id: int, default_s: int) -> int:
+        rows = self._conn.execute(
+            "SELECT (julianday(ready_at) - julianday(cooking_at)) * 86400 AS s "
+            "FROM grill_order WHERE location_id = ? AND ready_at IS NOT NULL "
+            "AND cooking_at IS NOT NULL ORDER BY id DESC LIMIT 5",
+            (location_id,),
+        ).fetchall()
+        spans = [r["s"] for r in rows if r["s"] and r["s"] > 0]
+        if not spans:
+            return default_s
+        return int(sum(spans) / len(spans))
+
+    def grill_orders_containing(self, location_id: int, recipe_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT o.* FROM grill_order o "
+            "WHERE o.location_id = ? "
+            "AND o.status IN ('placed','seen','cooking') "
+            "AND (o.main_id = ? OR EXISTS ("
+            "  SELECT 1 FROM json_each(o.condiments) j "
+            "  WHERE json_extract(j.value, '$.id') = ?))",
+            (location_id, recipe_id, recipe_id),
         ).fetchall()
         return [dict(r) for r in rows]
 

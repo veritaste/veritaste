@@ -15,6 +15,9 @@ from flask import g, request
 SESSION_COOKIE = "veritaste_session"
 SESSION_TTL_S = 12 * 3600
 
+KITCHEN_COOKIE = "veritaste_kitchen"
+KITCHEN_TTL_S = 24 * 3600
+
 _SECRET = os.environ.get("VERITASTE_SECRET", "").encode() or os.urandom(32)
 
 
@@ -70,6 +73,8 @@ def read_session(token: str | None) -> User | None:
 
     if body.get("exp", 0) < time.time():
         return None
+    if "sub" not in body:
+        return None
 
     return User(
         sub=body["sub"],
@@ -85,6 +90,30 @@ def current_user() -> User | None:
     if "veritaste_user" not in g:
         g.veritaste_user = read_session(request.cookies.get(SESSION_COOKIE))
     return g.veritaste_user
+
+
+def issue_kitchen() -> str:
+    body = {"aud": "kitchen", "exp": int(time.time()) + KITCHEN_TTL_S}
+    return _sign(json.dumps(body, separators=(",", ":")).encode())
+
+
+def read_kitchen(token: str | None) -> bool:
+    if not token or "." not in token:
+        return False
+    raw, sig = token.rsplit(".", 1)
+    try:
+        payload = _unpad(raw)
+        expected = hmac.new(_SECRET, payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, _unpad(sig)):
+            return False
+        body = json.loads(payload)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    return body.get("aud") == "kitchen" and body.get("exp", 0) >= time.time()
+
+
+def kitchen_unlocked() -> bool:
+    return read_kitchen(request.cookies.get(KITCHEN_COOKIE))
 
 
 def login_required(view):
