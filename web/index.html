@@ -146,6 +146,27 @@
   </div>
 </section>
 
+<section class="pane" id="pane-availability" hidden>
+  <div class="card board">
+    <div class="board86" aria-hidden="true">86</div>
+    <div class="card__hd"><h2>Availability Board</h2>
+      <span class="board__ctx" id="boardContext"></span>
+      <a class="textlink" id="boardTv" href="/display.html" target="_blank"
+         rel="noopener">(kitchen display)</a></div>
+    <div class="card__bd">
+      <p class="board__lead">Mark what the line has run out of — students see it
+        on the menu the moment you tap. A mark lasts until you restock it or the
+        day ends.</p>
+      <p class="board__msg" id="boardMsg" hidden></p>
+      <div id="boardMarked"></div>
+      <h3 class="board__sub">On the line</h3>
+      <input id="boardFilter" type="search" placeholder="Find a dish…"
+             autocomplete="off" aria-label="Filter dishes">
+      <div id="boardItems"></div>
+    </div>
+  </div>
+</section>
+
 <section class="pane" id="pane-account" hidden>
   <div class="acct">
 
@@ -157,7 +178,6 @@
         <p class="push__hint" id="pushHint"></p>
       </div>
     </div>
-
     <div class="card" id="acctWho">
       <div class="card__hd"><h2>Signed in as</h2></div>
       <div class="card__bd" id="acctWhoBody"></div>
@@ -179,6 +199,7 @@
   </div>
   <div class="sheet__bd" id="shBody"></div>
 </div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/app.js"></script>

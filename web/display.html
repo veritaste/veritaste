@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veritaste — Kitchen Display</title>
+<link rel="stylesheet" href="/display.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="brand__veri">VERI</span><span class="brand__taste">TASTE</span></div>
+  <div class="title">Availability · <span id="hall">…</span></div>
+  <div class="clock" id="clock" aria-hidden="true"></div>
+</header>
+
+<div class="stale" id="stale" hidden>
+  Connection lost — showing the board as of <span id="staleTime"></span>.
+</div>
+
+<main>
+  <section id="list" aria-live="polite"></section>
+  <aside id="demand" hidden></aside>
+</main>
+
+<div class="mark86" aria-hidden="true">86</div>
+
+<footer>This is not affiliated with or endorsed by Harvard University or HUDS.</footer>
+
+<script src="/display.js"></script>
+</body>
+</html>

@@ -113,6 +113,51 @@ CREATE TABLE IF NOT EXISTS push_subscription (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscription(user_sub);
+
+-- Scoped, revocable credentials for pulling aggregate reports. Not sessions:
+-- these are for machines — a BI tool, a spreadsheet refresh, an AI assistant's
+-- tool wrapper — so they are bearer tokens stored only as a hash, provisioned
+-- per integration and revocable per integration. Revocation is an UPDATE, not
+-- a DELETE: the row is the audit record of the key having existed.
+CREATE TABLE IF NOT EXISTS report_key (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    label        TEXT    NOT NULL,
+    key_hash     TEXT    NOT NULL UNIQUE,
+    scopes       TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    revoked_at   TEXT,
+    last_used_at TEXT
+);
+
+-- The Availability Board's current state: at most one mark per dish per hall.
+-- Marks are scoped to the Boston service day (`marked_on`) — a dish 86'd at
+-- dinner is not still 86'd at tomorrow's breakfast; reads filter on the day
+-- and stale rows are simply overwritten by the next mark.
+-- `note` is the routing line students see ("Salad bar is stocked until 8:00").
+CREATE TABLE IF NOT EXISTS stock_item (
+    location_id INTEGER NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    status      TEXT    NOT NULL CHECK (status IN ('low','out')),
+    note        TEXT,
+    marked_on   TEXT    NOT NULL,
+    marked_at   TEXT    NOT NULL,
+    PRIMARY KEY (location_id, recipe_id)
+);
+
+-- Append-only history of every mark and restock. The upsert above keeps only
+-- the present; this keeps what happened — which dishes ran out, when, and how
+-- often — which is exactly the record production planning wants back.
+CREATE TABLE IF NOT EXISTS stock_event (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    action      TEXT    NOT NULL,
+    note        TEXT,
+    user_id     TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stock_event
+    ON stock_event(location_id, created_at);
 """
 
 
@@ -502,3 +547,179 @@ class SqliteStore(Store):
             )
             for r in self._conn.execute(sql, params).fetchall()
         ]
+
+
+    def create_report_key(self, label: str, scopes: str, key_hash: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO report_key (label, key_hash, scopes, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (label, key_hash, scopes, datetime.utcnow().isoformat()),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def report_keys(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, label, scopes, created_at, revoked_at, last_used_at "
+            "FROM report_key ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def revoke_report_key(self, key_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE report_key SET revoked_at = ? "
+                "WHERE id = ? AND revoked_at IS NULL",
+                (datetime.utcnow().isoformat(), key_id),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def verify_report_key(self, key_hash: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT id, label, scopes FROM report_key "
+            "WHERE key_hash = ? AND revoked_at IS NULL",
+            (key_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        with self._lock:
+            self._conn.execute(
+                "UPDATE report_key SET last_used_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), row["id"]),
+            )
+            self._conn.commit()
+        return dict(row)
+
+    def ratings_report(self, location_id: int | None, days: int) -> list[dict]:
+        cut = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        prior_cut = (datetime.utcnow() - timedelta(days=2 * days)).isoformat()
+        rows = self._conn.execute(
+            """
+            SELECT recipe_id, location_id,
+                   COUNT(*)                                          AS votes,
+                   ROUND(AVG(score), 2)                              AS average,
+                   SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END)  AS recent_votes,
+                   ROUND(AVG(CASE WHEN updated_at >= ? THEN score END), 2)
+                                                                     AS recent_average,
+                   MAX(updated_at)                                   AS last_rated
+            FROM rating
+            WHERE (? IS NULL OR location_id = ?)
+            GROUP BY recipe_id, location_id
+            ORDER BY recent_votes DESC, votes DESC, recipe_id
+            """,
+            (cut, cut, location_id, location_id),
+        ).fetchall()
+        prior = {
+            (r["recipe_id"], r["location_id"]): r["prior_average"]
+            for r in self._conn.execute(
+                """
+                SELECT recipe_id, location_id,
+                       ROUND(AVG(score), 2) AS prior_average
+                FROM rating_history
+                WHERE created_at >= ? AND created_at < ?
+                  AND (? IS NULL OR location_id = ?)
+                GROUP BY recipe_id, location_id
+                """,
+                (prior_cut, cut, location_id, location_id),
+            ).fetchall()
+        }
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["prior_average"] = prior.get((r["recipe_id"], r["location_id"]))
+            out.append(d)
+        return out
+
+    def attendance_report(
+        self, location_id: int | None, date_from: str, date_to: str
+    ) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT served_on, meal, location_id,
+                   SUM(attending)     AS declared_attending,
+                   SUM(1 - attending) AS declared_absent,
+                   COUNT(*)           AS responses
+            FROM attendance_intent
+            WHERE served_on >= ? AND served_on <= ?
+              AND (? IS NULL OR location_id = ?)
+            GROUP BY served_on, meal, location_id
+            ORDER BY served_on, meal, location_id
+            """,
+            (date_from, date_to, location_id, location_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+    def set_stock(self, location_id: int, recipe_id: int, status: str,
+                  note: str | None, user_id: str, marked_on: str) -> None:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO stock_item
+                    (location_id, recipe_id, status, note, marked_on, marked_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(location_id, recipe_id) DO UPDATE SET
+                    status    = excluded.status,
+                    note      = excluded.note,
+                    marked_on = excluded.marked_on,
+                    marked_at = excluded.marked_at
+                """,
+                (location_id, recipe_id, status, note, marked_on, now),
+            )
+            self._conn.execute(
+                "INSERT INTO stock_event "
+                "(location_id, recipe_id, action, note, user_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (location_id, recipe_id, status, note, user_id, now),
+            )
+            self._conn.commit()
+
+    def clear_stock(self, location_id: int, recipe_id: int, user_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM stock_item WHERE location_id = ? AND recipe_id = ?",
+                (location_id, recipe_id),
+            )
+            if cur.rowcount:
+                self._conn.execute(
+                    "INSERT INTO stock_event "
+                    "(location_id, recipe_id, action, note, user_id, created_at) "
+                    "VALUES (?, ?, 'restocked', NULL, ?, ?)",
+                    (location_id, recipe_id, user_id,
+                     datetime.utcnow().isoformat()),
+                )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def stock_marks(self, location_id: int, marked_on: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT recipe_id, status, note, marked_at FROM stock_item "
+            "WHERE location_id = ? AND marked_on = ? "
+            "ORDER BY marked_at DESC",
+            (location_id, marked_on),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def waste_report(
+        self, location_id: int | None, date_from: str, date_to: str
+    ) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT recipe_id, location_id,
+                   COUNT(*)                  AS services,
+                   ROUND(SUM(prepared_lb), 1) AS prepared_lb,
+                   ROUND(SUM(wasted_lb), 1)   AS wasted_lb,
+                   ROUND(SUM(wasted_lb) / NULLIF(SUM(prepared_lb), 0.0), 4)
+                                              AS waste_rate
+            FROM waste_observation
+            WHERE served_on >= ? AND served_on <= ?
+              AND (? IS NULL OR location_id = ?)
+            GROUP BY recipe_id, location_id
+            ORDER BY waste_rate DESC, recipe_id
+            """,
+            (date_from, date_to, location_id, location_id),
+        ).fetchall()
+        return [dict(r) for r in rows]

@@ -47,13 +47,14 @@ const PANES = [
   { id: "menu",    label: "Menu",             roles: null },
 
   { id: "where",   label: "Where can I eat?", staffLabel: "Interhouse rules", roles: null },
+
+  { id: "availability", label: "Availability Board", roles: ["staff"] },
   { id: "account", label: "My account",       roles: null },
 ];
 
 function paneLabel(pane, user) {
   return (user && user.affiliation === "staff" && pane.staffLabel) || pane.label;
 }
-
 function panesFor(user) {
   const role = user ? user.affiliation : null;
   return PANES.filter(p => !p.roles || (role && p.roles.includes(role)));
@@ -90,6 +91,7 @@ function showPane(id, { push = true } = {}) {
   document.querySelectorAll(".pane").forEach(el =>
     el.hidden = el.id !== `pane-${id}`);
   renderNav();
+  if (id === "availability") loadBoard();
   if (push) writeUrl();
   window.scrollTo({ top: 0 });
 }
@@ -439,6 +441,9 @@ function catRank(name) {
 
 function chips(it) {
   const out = [];
+
+  if (it.availability && it.availability.status === "low")
+    out.push(`<span class="chip plain">Running low</span>`);
   if (it.vegan) out.push(`<span class="chip vgn">Vegan</span>`);
   else if (it.vegetarian) out.push(`<span class="chip veg">Vegetarian</span>`);
   if (it.spice && it.spice.level > 0) {
@@ -458,16 +463,22 @@ function chips(it) {
 function dishRow(it) {
   const meta = [it.calories ? `${it.calories} cal` : null, it.serving_size]
     .filter(Boolean).join(" &nbsp;·&nbsp; ");
-  return `<button class="dish" data-id="${it.id}">
+  const avail = it.availability;
+  const isOut = !!avail && avail.status === "out";
+
+  const availLine = avail
+    ? (avail.note || (isOut ? "Ran out for this service." : null))
+    : null;
+  return `<button class="dish${isOut ? " dish--out" : ""}" data-id="${it.id}">
     <div class="dish__main">
       <div class="dish__name">${esc(it.name)}</div>
       ${meta ? `<div class="dish__meta">${meta}</div>` : ""}
+      ${availLine ? `<div class="dish__avail">${esc(availLine)}</div>` : ""}
       <div class="chips">${chips(it)}</div>
     </div>
     <div class="dish__go">&rsaquo;</div>
   </button>`;
 }
-
 async function loadMenu() {
   const box = $("#menu");
   box.innerHTML = `<div class="state"><div class="spin"></div>Loading menu…</div>`;
@@ -478,10 +489,10 @@ async function loadMenu() {
     data = await api(`/menu?date=${state.date}&location=${state.hall}&meal=${state.meal}`);
   } catch (e) {
     box.innerHTML = `<div class="state">Couldn't load the menu.<br><small>${esc(e.message)}</small></div>`;
+
     updateContextNotices(null);
     return;
   }
-
   const options = data.meal_options || [];
   if (!state.correctingMeal && options.length &&
       !options.some(o => o.meal === state.meal)) {
@@ -531,6 +542,8 @@ async function loadMenu() {
     b.addEventListener("click", () => openSheet(Number(b.dataset.id))));
 
   updateContextNotices(data);
+
+  if (state.pane === "availability") renderBoard();
 }
 
 function updateContextNotices(data) {
@@ -575,6 +588,147 @@ function updateContextNotices(data) {
   renderLineCard();
 }
 
+async function loadBoard() {
+  if (!state.user || state.user.affiliation !== "staff") return;
+  if (!state.boardWired) {
+    state.boardWired = true;
+    $("#boardFilter").addEventListener("input", renderBoardItems);
+  }
+  const hallName = $("#hall").selectedOptions[0]?.textContent || `hall ${state.hall}`;
+  $("#boardContext").textContent = `${hallName} · ${MEALS[state.meal]}`;
+  $("#boardTv").href = `/display.html?hall=${state.hall}`;
+  try {
+    const data = await api(`/availability?location=${state.hall}`);
+    state.boardMarks = new Map(data.marks.map(m => [m.recipe_id, m]));
+    boardMsg(null);
+  } catch (e) {
+    state.boardMarks = new Map();
+    boardMsg(e.message);
+  }
+  renderBoard();
+}
+function boardMsg(text) {
+  const el = $("#boardMsg");
+  el.hidden = !text;
+  el.textContent = text || "";
+}
+
+async function boardAct(fn) {
+  try { await fn(); boardMsg(null); }
+  catch (e) { boardMsg(e.message); }
+  await loadBoard();
+
+  refreshContext();
+}
+
+function renderBoard() {
+  const marks = [...(state.boardMarks?.values() ?? [])];
+  const mbox = $("#boardMarked");
+  mbox.innerHTML = marks.length ? marks.map(m => {
+    const name = m.name || state.items.get(m.recipe_id)?.name || `Dish ${m.recipe_id}`;
+    return `<div class="bmark" data-id="${m.recipe_id}">
+      <div class="bmark__row">
+        <span class="chip ${m.status === "out" ? "plain" : "alg"}">${
+          m.status === "out" ? "Out" : "Low"}</span>
+        <span class="bmark__name">${esc(name)}</span>
+        <button class="btn ghost small" data-restock="${m.recipe_id}">Restock</button>
+      </div>
+      <div class="bmark__noterow">
+        ${m.note ? `<span class="bmark__note">${esc(m.note)}</span>` : ""}
+        <button class="textlink" data-note="${m.recipe_id}">(${
+          m.note ? "edit note" : "add note"})</button>
+      </div>
+      <div class="bmark__noteui" hidden>
+        <input type="text" maxlength="140" value="${esc(m.note || "")}"
+               placeholder="Anything students should know? (optional)"
+               aria-label="Note for students">
+        <button class="btn ghost small" data-save="${m.recipe_id}">Save note</button>
+        <div class="bmark__links">
+          <button class="textlink" data-cancel="${m.recipe_id}">Cancel</button>
+          ${m.note ? `<button class="textlink" data-unnote="${m.recipe_id}">Remove note</button>` : ""}
+        </div>
+      </div>
+    </div>`;
+  }).join("") : `<p class="board__empty">Nothing is marked — the line is fully stocked.</p>`;
+
+  mbox.querySelectorAll("[data-note]").forEach(b =>
+    b.addEventListener("click", () => {
+      const card = mbox.querySelector(`.bmark[data-id="${b.dataset.note}"]`);
+      card.querySelector(".bmark__noteui").hidden = false;
+      card.querySelector(".bmark__noterow").hidden = true;
+      card.querySelector(".bmark__noteui input").focus();
+    }));
+  mbox.querySelectorAll("[data-save]").forEach(b =>
+    b.addEventListener("click", () => {
+      const id = Number(b.dataset.save);
+      const mark = state.boardMarks.get(id);
+      const note = mbox.querySelector(
+        `.bmark[data-id="${id}"] .bmark__noteui input`).value.trim();
+      boardAct(() => api("/availability", { method: "POST", body: {
+        location_id: state.hall, recipe_id: id, status: mark.status,
+        note: note || null } }));
+    }));
+  mbox.querySelectorAll("[data-cancel]").forEach(b =>
+    b.addEventListener("click", () => {
+      const card = mbox.querySelector(`.bmark[data-id="${b.dataset.cancel}"]`);
+      const ui = card.querySelector(".bmark__noteui");
+
+      ui.querySelector("input").value =
+        state.boardMarks.get(Number(b.dataset.cancel))?.note || "";
+      ui.hidden = true;
+      card.querySelector(".bmark__noterow").hidden = false;
+    }));
+  mbox.querySelectorAll("[data-unnote]").forEach(b =>
+    b.addEventListener("click", () => {
+      const id = Number(b.dataset.unnote);
+      const mark = state.boardMarks.get(id);
+      boardAct(() => api("/availability", { method: "POST", body: {
+        location_id: state.hall, recipe_id: id, status: mark.status,
+        note: null } }));
+    }));
+  mbox.querySelectorAll("[data-restock]").forEach(b =>
+    b.addEventListener("click", () => boardAct(() =>
+      api(`/availability?location=${state.hall}&recipe=${b.dataset.restock}`,
+          { method: "DELETE" }))));
+  renderBoardItems();
+}
+
+function renderBoardItems() {
+  const box = $("#boardItems");
+  const q = ($("#boardFilter").value || "").trim().toLowerCase();
+  const all = [...state.items.values()]
+    .filter(i => !state.boardMarks?.has(i.id))
+    .filter(i => !q || (i.name || "").toLowerCase().includes(q))
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const shown = all.slice(0, 30);
+
+  if (!shown.length) {
+    box.innerHTML = `<p class="board__empty">${state.items.size
+      ? "No dish matches."
+      : "No menu is loaded — open the Menu pane and pick the hall and meal first."}</p>`;
+    return;
+  }
+  box.innerHTML = shown.map(i => `
+    <div class="brow">
+      <span class="brow__name">${esc(i.name)}</span>
+      <button class="btn ghost small low" data-low="${i.id}">Mark as low</button>
+      <button class="btn ghost small" data-out="${i.id}">Mark as out</button>
+    </div>`).join("") + (all.length > shown.length
+      ? `<p class="board__more">…and ${all.length - shown.length} more — type to find a dish.</p>`
+      : "");
+
+  box.querySelectorAll("[data-low]").forEach(b =>
+    b.addEventListener("click", () => boardAct(() =>
+      api("/availability", { method: "POST", body: {
+        location_id: state.hall, recipe_id: Number(b.dataset.low),
+        status: "low" } }))));
+  box.querySelectorAll("[data-out]").forEach(b =>
+    b.addEventListener("click", () => boardAct(() =>
+      api("/availability", { method: "POST", body: {
+        location_id: state.hall, recipe_id: Number(b.dataset.out),
+        status: "out" } }))));
+}
+
 const NUTRI = [
   ["total_fat", "Total Fat"], ["sat_fat", "Saturated Fat"], ["trans_fat", "Trans Fat"],
   ["cholesterol", "Cholesterol"], ["sodium", "Sodium"], ["total_carb", "Total Carbohydrate"],
@@ -591,8 +745,10 @@ async function openSheet(id, { push = true } = {}) {
   document.body.style.overflow = "hidden";
 
   let r;
+
   try { r = await api(`/recipes/${id}?location=${state.hall}`); }
   catch (e) { $("#shBody").innerHTML = `<div class="state">${esc(e.message)}</div>`; return; }
+
   $("#shTitle").textContent = r.name;
   const rows = NUTRI.map(([k, label]) => {
     const v = r[k];
@@ -600,12 +756,20 @@ async function openSheet(id, { push = true } = {}) {
     return `<tr><th>${label}</th><td>${esc(v.amount)}</td>
       <td class="dv">${v.percent != null ? Math.round(v.percent) + "%" : ""}</td></tr>`;
   }).join("");
+
   const signedOut = !state.user;
+  const shAvail = r.availability
+    ? (r.availability.note
+       || (r.availability.status === "out" ? "Ran out for this service."
+                                           : "Running low."))
+    : null;
   $("#shBody").innerHTML = `
+    ${shAvail ? `<div class="dish__avail dish__avail--sheet">${esc(shAvail)}</div>` : ""}
     <div class="kcal">
       <b>${r.calories ?? "—"}</b><span>calories</span>
       <span style="flex:1"></span><span>${esc(r.serving_size || "")}</span>
     </div>
+
     <div class="chips" style="margin-top:14px">${chips({
       vegan: r.vegan, vegetarian: r.vegetarian, allergens: r.allergens,
       spice: r.spice, consumption: r.consumption, rating: r.rating,
@@ -624,6 +788,7 @@ async function openSheet(id, { push = true } = {}) {
       <table class="nutri">${rows}</table>
       <p style="font-size:12px;color:var(--ink-mute);margin:8px 0 0">
         Right column is % Daily Value.</p></div>` : ""}
+
     <div class="sec">
       <h4>Rate this dish</h4>
       <div class="rate" id="sheetRate">
@@ -735,7 +900,6 @@ async function loadLine() {
     ]);
     state.line = now;
     renderLineCard();
-
     const series = typical.series;
     const peak = Math.max(...series.map(s => s.busyness), 0.01);
     const nowHM = new Date().toTimeString().slice(0, 5);
@@ -787,6 +951,7 @@ async function loadInterhouse() {
   }
 
   $("#whereTitle").textContent = isStaff ? "Interhouse rules" : "Where can I eat?";
+
   let data;
   try {
     data = await api(`/interhouse?meal=${state.meal}&date=${state.date}`);
@@ -794,6 +959,7 @@ async function loadInterhouse() {
     box.innerHTML = `<div class="state" style="padding:20px 0">${esc(e.message)}</div>`;
     return;
   }
+
   const labels = isStaff ? ACCESS_LABEL_STAFF : ACCESS_LABEL;
   const rows = data.halls.map(h => `
     <div class="ih">
@@ -809,7 +975,6 @@ async function loadInterhouse() {
   const who = isStaff
     ? `Access rules in force for ${when}, as they apply to a student from another House:`
     : `As a <b>${esc(data.viewer_house_name || data.viewer_house)}</b> resident, for ${when}:`;
-
   box.innerHTML = `
     <p style="margin:0 0 10px;font-size:13.5px;color:var(--ink-soft)">${who}</p>
     ${rows}
@@ -820,8 +985,8 @@ async function loadInterhouse() {
       <span><i style="background:var(--shade)"></i>Unconfirmed</span>
     </div>
     <p style="margin:12px 0 0;font-size:12.5px;color:var(--ink-mute)">${esc(data.caveat)}</p>`;
-}
 
+}
 function rsvpQuestion() {
   const hall = $("#hall").selectedOptions[0]?.textContent || "here";
 
@@ -862,6 +1027,7 @@ function renderRsvp() {
   why.style.display = "none";
   act.style.display = "none";
 }
+
 function markRsvp(attending) {
   $("#yesBtn").setAttribute("aria-pressed", String(attending === true));
   $("#noBtn").setAttribute("aria-pressed", String(attending === false));
@@ -939,7 +1105,6 @@ async function init() {
     const open = list.classList.toggle("open");
     $("#navToggle").setAttribute("aria-expanded", String(open));
   });
-
   $("#yesBtn").addEventListener("click", () => declare(true));
   $("#noBtn").addEventListener("click", () => declare(false));
   $("#scrim").addEventListener("click", () => closeSheet());
@@ -955,4 +1120,5 @@ async function init() {
 
   if (u.dish != null) openSheet(u.dish, { push: false });
 }
+
 init();

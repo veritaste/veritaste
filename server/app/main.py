@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import os
 import secrets
@@ -11,7 +12,7 @@ from apiflask.fields import Boolean, Integer, String
 from apiflask.validators import Length, OneOf, Range
 from flask import current_app, g, jsonify, request, send_from_directory
 
-from . import __version__, push
+from . import __version__, push, reports
 from .auth import SESSION_COOKIE, User, current_user, issue_session, login_required
 from .config import (CACHE_TTL_HOURS, DB_PATH, DEMO_MODE, ECS_APIKEY, LOCAL_TZ,
                      MODE, RATING_RECENT_DAYS, STORE_BACKEND, TIMEZONE, WEB_DIR)
@@ -85,6 +86,35 @@ class PushSubIn(Schema):
 
 class PushEndpointIn(Schema):
     endpoint = String(required=True, validate=Length(max=1000))
+
+
+class AvailabilityQuery(Schema):
+    location = Integer(required=True)
+
+
+class StockIn(Schema):
+    location_id = Integer(required=True)
+    recipe_id = Integer(required=True)
+    status = String(required=True, validate=OneOf(["low", "out"]))
+    note = String(load_default=None, allow_none=True, validate=Length(max=140))
+
+
+class StockClearQuery(Schema):
+    location = Integer(required=True)
+    recipe = Integer(required=True)
+
+
+class RatingsReportQuery(Schema):
+    location = Integer(load_default=None, allow_none=True)
+    days = Integer(load_default=RATING_RECENT_DAYS, validate=Range(min=1, max=365))
+    format = String(load_default="json", validate=OneOf(["json", "csv"]))
+
+
+class ServiceReportQuery(Schema):
+    location = Integer(load_default=None, allow_none=True)
+    date_from = String(data_key="from", load_default=None, allow_none=True)
+    date_to = String(data_key="to", load_default=None, allow_none=True)
+    format = String(load_default="json", validate=OneOf(["json", "csv"]))
 
 
 def _svc():
@@ -199,7 +229,7 @@ def _award(user: User, kind: str, location_id: int | None,
     }
 
 
-def _item(recipe: dict, rating, consumption) -> dict:
+def _item(recipe: dict, rating, consumption, availability=None) -> dict:
     spice = spice_for(recipe)
     return {
         "id": recipe["id"],
@@ -221,7 +251,40 @@ def _item(recipe: dict, rating, consumption) -> dict:
             "observations": consumption.observations,
             "band": _band(consumption.rate),
         },
+        "availability": availability,
     }
+
+
+def staff_required(view):
+
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if user is None:
+            abort(401, "Sign in to use kitchen tools.")
+        if user.affiliation != "staff":
+            abort(403, "Kitchen tools are staff-only.")
+        return view(*args, **kwargs)
+
+    return wrapper
+
+
+def report_key_required(view):
+
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        token = reports.bearer_token(request.headers.get("Authorization"))
+        if token is None:
+            abort(401, "Send a report key: Authorization: Bearer <key>.")
+        record = _svc().store.verify_report_key(reports.hash_key(token))
+        if record is None:
+            abort(401, "Unknown or revoked report key.")
+        if not reports.has_scope(record["scopes"], "reports:read"):
+            abort(403, "This key does not carry the reports:read scope.")
+        g.report_key = record
+        return view(*args, **kwargs)
+
+    return wrapper
 
 
 def create_app() -> APIFlask:
@@ -353,6 +416,10 @@ def _register(app: APIFlask) -> None:
         categories = {c["id"]: c["name"] for c in svc.dining.categories()}
         ratings = svc.store.rating_summary(recipe_ids, location, RATING_RECENT_DAYS)
         consumption = svc.store.consumption_signals(recipe_ids)
+        stock = {
+            m["recipe_id"]: {"status": m["status"], "note": m["note"]}
+            for m in svc.store.stock_marks(location, date)
+        }
 
         grouped: dict[str, list[dict]] = {}
         seen: set[tuple[str, int]] = set()
@@ -365,7 +432,8 @@ def _register(app: APIFlask) -> None:
                 continue
             seen.add((cat, recipe["id"]))
             grouped.setdefault(cat, []).append(
-                _item(recipe, ratings.get(recipe["id"]), consumption.get(recipe["id"]))
+                _item(recipe, ratings.get(recipe["id"]), consumption.get(recipe["id"]),
+                      stock.get(recipe["id"]))
             )
 
         return {
@@ -395,8 +463,16 @@ def _register(app: APIFlask) -> None:
         yours = (svc.store.user_rating(user.sub, recipe_id, location)
                  if user is not None and location is not None else None)
 
+        stock = None
+        if location is not None:
+            for m in svc.store.stock_marks(location, _today()):
+                if m["recipe_id"] == recipe_id:
+                    stock = {"status": m["status"], "note": m["note"]}
+                    break
+
         return {
             **recipe,
+            "availability": stock,
             "spice": {"level": spice.level, "curated": spice.curated, "basis": spice.basis},
             "your_rating": yours,
             "rating": None if rating is None else {
@@ -728,6 +804,165 @@ def _register(app: APIFlask) -> None:
                     svc.store.delete_push_sub(sub.endpoint)
         return {"sent": sent, "subscriptions": len(subs),
                 "reason": reasons[0] if reasons else None}
+
+
+    @app.get(f"{API}/availability")
+    @app.input(AvailabilityQuery, location="query")
+    @app.doc(tags=["availability"], summary="Today's low/out marks for a hall")
+    def availability(query_data):
+        svc = _svc()
+        location = query_data["location"]
+        marks = svc.store.stock_marks(location, _today())
+        names = {}
+        if marks:
+            fetched = svc.dining.recipes([m["recipe_id"] for m in marks])
+            names = {rid: rec.get("name") for rid, rec in fetched.items()}
+        for m in marks:
+            m["name"] = names.get(m["recipe_id"])
+        marks.sort(key=lambda m: ((m["name"] or "").lower() or "￿",
+                                  m["recipe_id"]))
+        return {"location": location, "date": _today(), "marks": marks}
+
+    @app.post(f"{API}/availability")
+    @staff_required
+    @app.input(StockIn)
+    @app.doc(tags=["availability"],
+             summary="Mark a dish low or out at a hall (staff)")
+    def set_availability(json_data):
+        svc = _svc()
+        svc.store.set_stock(
+            json_data["location_id"], json_data["recipe_id"],
+            json_data["status"], json_data.get("note"),
+            current_user().sub, _today(),
+        )
+        return {"ok": True, "status": json_data["status"],
+                "recipe_id": json_data["recipe_id"]}
+
+    @app.delete(f"{API}/availability")
+    @staff_required
+    @app.input(StockClearQuery, location="query")
+    @app.doc(tags=["availability"],
+             summary="Clear a mark — the dish is back (staff)")
+    def clear_availability(query_data):
+        cleared = _svc().store.clear_stock(
+            query_data["location"], query_data["recipe"], current_user().sub,
+        )
+        return {"cleared": cleared}
+
+
+    def _report_payload(kind: str, rows: list[dict], columns: list[str],
+                        fmt: str, meta: dict):
+        if fmt == "csv":
+            stamp = _today().replace("-", "")
+            return app.response_class(
+                reports.to_csv(rows, columns),
+                mimetype="text/csv",
+                headers={"Content-Disposition":
+                         f'attachment; filename="veritaste-{kind}-{stamp}.csv"'},
+            )
+        return {
+            "report": kind, **meta, "row_count": len(rows), "rows": rows,
+            "generated_at": dt.datetime.utcnow().isoformat(),
+            "disclaimer": DISCLAIMER,
+        }
+
+    def _hall_names(svc) -> dict[int, str]:
+        try:
+            return {loc["id"]: loc["name"] for loc in svc.dining.locations()}
+        except Exception:
+            return {}
+
+    def _dish_names(svc, rows: list[dict]) -> tuple[dict[int, str], bool]:
+        ids = sorted({r["recipe_id"] for r in rows})
+        if not ids:
+            return {}, False
+        if len(ids) > reports.NAME_RESOLVE_MAX:
+            return {}, True
+        fetched = svc.dining.recipes(ids)
+        return {rid: rec.get("name") for rid, rec in fetched.items()}, False
+
+    def _report_window(query_data) -> tuple[str, str]:
+        to_s = query_data["date_to"] or _today()
+        try:
+            to_d = _parse_date(to_s)
+            from_s = (query_data["date_from"]
+                      or (to_d - dt.timedelta(days=30)).isoformat())
+            from_d = _parse_date(from_s)
+        except ValueError:
+            abort(422, "Dates are YYYY-MM-DD.")
+        if from_d > to_d:
+            abort(422, "`from` is after `to`.")
+        return from_s, to_s
+
+    @app.get(f"{API}/reports/ratings")
+    @report_key_required
+    @app.input(RatingsReportQuery, location="query")
+    @app.doc(tags=["reports"],
+             summary="Dish ratings by hall — aggregate export (report key)")
+    def report_ratings(query_data):
+        svc = _svc()
+        days = query_data["days"]
+        rows = svc.store.ratings_report(query_data["location"], days)
+        names, truncated = _dish_names(svc, rows)
+        halls = _hall_names(svc)
+        for r in rows:
+            r["name"] = names.get(r["recipe_id"])
+            r["hall"] = halls.get(r["location_id"])
+            r["trend"] = reports.trend(r["recent_average"], r["prior_average"])
+            r["small_sample"] = (r["recent_votes"] or 0) < reports.SMALL_SAMPLE_MIN
+        columns = ["recipe_id", "name", "location_id", "hall", "votes",
+                   "average", "recent_votes", "recent_average", "prior_average",
+                   "trend", "small_sample", "last_rated"]
+        meta = {"window_days": days, "location": query_data["location"],
+                "small_sample_below": reports.SMALL_SAMPLE_MIN}
+        if truncated:
+            meta["note"] = (f"More than {reports.NAME_RESOLVE_MAX} distinct "
+                            "dishes; names omitted to spare the upstream API.")
+        return _report_payload("ratings", rows, columns,
+                               query_data["format"], meta)
+
+    @app.get(f"{API}/reports/attendance")
+    @report_key_required
+    @app.input(ServiceReportQuery, location="query")
+    @app.doc(tags=["reports"],
+             summary="Declared attendance by service — aggregate export (report key)")
+    def report_attendance(query_data):
+        svc = _svc()
+        from_s, to_s = _report_window(query_data)
+        rows = svc.store.attendance_report(query_data["location"], from_s, to_s)
+        halls = _hall_names(svc)
+        for r in rows:
+            r["date"] = r.pop("served_on")
+            r["meal_name"] = MEAL_NAMES.get(r["meal"])
+            r["hall"] = halls.get(r["location_id"])
+        columns = ["date", "meal", "meal_name", "location_id", "hall",
+                   "declared_attending", "declared_absent", "responses"]
+        meta = {"from": from_s, "to": to_s, "location": query_data["location"]}
+        return _report_payload("attendance", rows, columns,
+                               query_data["format"], meta)
+
+    @app.get(f"{API}/reports/waste")
+    @report_key_required
+    @app.input(ServiceReportQuery, location="query")
+    @app.doc(tags=["reports"],
+             summary="Prepared vs wasted by dish — aggregate export (report key)")
+    def report_waste(query_data):
+        svc = _svc()
+        from_s, to_s = _report_window(query_data)
+        rows = svc.store.waste_report(query_data["location"], from_s, to_s)
+        names, truncated = _dish_names(svc, rows)
+        halls = _hall_names(svc)
+        for r in rows:
+            r["name"] = names.get(r["recipe_id"])
+            r["hall"] = halls.get(r["location_id"])
+        columns = ["recipe_id", "name", "location_id", "hall", "services",
+                   "prepared_lb", "wasted_lb", "waste_rate"]
+        meta = {"from": from_s, "to": to_s, "location": query_data["location"]}
+        if truncated:
+            meta["note"] = (f"More than {reports.NAME_RESOLVE_MAX} distinct "
+                            "dishes; names omitted to spare the upstream API.")
+        return _report_payload("waste", rows, columns,
+                               query_data["format"], meta)
 
 
     @app.get("/")

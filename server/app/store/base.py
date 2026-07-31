@@ -188,3 +188,50 @@ class Store(ABC):
         self, user_id: str | None = None, affiliation: str | None = None
     ) -> list[PushSub]:
         ...
+
+
+    @abstractmethod
+    def create_report_key(self, label: str, scopes: str, key_hash: str) -> int:
+        ...
+
+    @abstractmethod
+    def report_keys(self) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def revoke_report_key(self, key_id: int) -> bool:
+        ...
+
+    @abstractmethod
+    def verify_report_key(self, key_hash: str) -> dict | None:
+        ...
+
+    @abstractmethod
+    def ratings_report(self, location_id: int | None, days: int) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def attendance_report(
+        self, location_id: int | None, date_from: str, date_to: str
+    ) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def waste_report(
+        self, location_id: int | None, date_from: str, date_to: str
+    ) -> list[dict]:
+        ...
+
+
+    @abstractmethod
+    def set_stock(self, location_id: int, recipe_id: int, status: str,
+                  note: str | None, user_id: str, marked_on: str) -> None:
+        ...
+
+    @abstractmethod
+    def clear_stock(self, location_id: int, recipe_id: int, user_id: str) -> bool:
+        ...
+
+    @abstractmethod
+    def stock_marks(self, location_id: int, marked_on: str) -> list[dict]:
+        ...
