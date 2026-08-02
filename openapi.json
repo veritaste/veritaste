@@ -30,6 +30,66 @@
         ],
         "type": "object"
       },
+      "FeedbackBlockIn": {
+        "additionalProperties": false,
+        "properties": {
+          "note_id": {
+            "type": "integer"
+          },
+          "reason": {
+            "default": null,
+            "maxLength": 200,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "note_id"
+        ],
+        "type": "object"
+      },
+      "FeedbackIn": {
+        "additionalProperties": false,
+        "properties": {
+          "location_id": {
+            "type": "integer"
+          },
+          "meal": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "recipe_id": {
+            "type": "integer"
+          },
+          "signed": {
+            "default": false,
+            "type": "boolean"
+          },
+          "source": {
+            "default": "sheet",
+            "enum": [
+              "sheet",
+              "rating",
+              "survey"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "location_id",
+          "meal",
+          "recipe_id",
+          "text"
+        ],
+        "type": "object"
+      },
       "GrillAdvanceIn": {
         "additionalProperties": false,
         "properties": {
@@ -128,6 +188,27 @@
         ],
         "type": "object"
       },
+      "LineReportIn": {
+        "additionalProperties": false,
+        "properties": {
+          "band": {
+            "enum": [
+              "no_wait",
+              "short",
+              "long",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "band"
+        ],
+        "type": "object"
+      },
       "PushSubIn": {
         "additionalProperties": false,
         "properties": {
@@ -154,14 +235,6 @@
       "RatingIn": {
         "additionalProperties": false,
         "properties": {
-          "comment": {
-            "default": null,
-            "maxLength": 1000,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "location_id": {
             "type": "integer"
           },
@@ -614,6 +687,221 @@
         ]
       }
     },
+    "/api/v1/feedback": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Notes students sent the kitchen (staff)",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Tell the kitchen about a dish (requires sign-in)",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/v1/feedback/blocks": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "note_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Reinstate a note's author (staff)",
+        "tags": [
+          "feedback"
+        ]
+      },
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackBlockIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Pause a note's author from feedback (staff, name-blind)",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/v1/forecast": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "meal",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Production-planning view for one service (staff)",
+        "tags": [
+          "forecast"
+        ]
+      }
+    },
     "/api/v1/grill": {
       "get": {
         "parameters": [
@@ -975,6 +1263,63 @@
         ]
       }
     },
+    "/api/v1/line/{location_id}/report": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "location_id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LineReportIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Report the line as a band \u2014 expires in 30 minutes (staff)",
+        "tags": [
+          "signals"
+        ]
+      }
+    },
     "/api/v1/line/{location_id}/typical": {
       "get": {
         "parameters": [
@@ -1310,6 +1655,16 @@
           {
             "in": "query",
             "name": "location",
+            "required": false,
+            "schema": {
+              "default": null,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "meal",
             "required": false,
             "schema": {
               "default": null,

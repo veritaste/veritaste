@@ -40,6 +40,8 @@ from .store import PushSub, build_store
 
 API = "/api/v1"
 
+LINE_REPORT_TTL_MIN = 30
+
 DISCLAIMER = (
     "This is not affiliated with or endorsed by Harvard University or HUDS."
 )
@@ -72,11 +74,11 @@ class RatingIn(Schema):
     score = Integer(required=True, validate=Range(min=1, max=5))
     location_id = Integer(required=True)
     served_on = String(load_default=None, allow_none=True)
-    comment = String(load_default=None, allow_none=True, validate=Length(max=1000))
 
 
 class RecipeQuery(Schema):
     location = Integer(load_default=None, allow_none=True)
+    meal = Integer(load_default=None, allow_none=True)
 
 
 class AttendanceIn(Schema):
@@ -118,6 +120,42 @@ class StockClearQuery(Schema):
 
 class KitchenIn(Schema):
     passcode = String(required=True, validate=Length(max=200))
+
+
+class FeedbackIn(Schema):
+    recipe_id = Integer(required=True)
+    location_id = Integer(required=True)
+    meal = Integer(required=True, validate=Range(min=0))
+    text = String(required=True, validate=Length(min=1, max=500))
+    signed = Boolean(load_default=False)
+    source = String(load_default="sheet",
+                    validate=OneOf(["sheet", "rating", "survey"]))
+
+
+class FeedbackQuery(Schema):
+    location = Integer(required=True)
+    date = String(load_default=None, allow_none=True)
+
+
+class FeedbackBlockIn(Schema):
+    note_id = Integer(required=True)
+    reason = String(load_default=None, allow_none=True,
+                    validate=Length(max=200))
+
+
+class FeedbackBlockQuery(Schema):
+    note_id = Integer(required=True)
+
+
+class LineReportIn(Schema):
+    band = String(required=True, allow_none=True,
+                  validate=OneOf(["no_wait", "short", "long"]))
+
+
+class ForecastQuery(Schema):
+    location = Integer(required=True)
+    meal = Integer(required=True, validate=Range(min=0))
+    date = String(load_default=None, allow_none=True)
 
 
 class GrillQuery(Schema):
@@ -222,6 +260,39 @@ def _declaration_window(
     closes = declaration_closes_at(location_id, on, meal, LOCAL_TZ)
     status = service_status(location_id, on, meal, LOCAL_TZ, now)
     return status == "upcoming", closes.isoformat(timespec="minutes"), status
+
+
+REAL_TYPICAL_MIN_REPORTS = 6
+REAL_TYPICAL_MIN_DAYS = 2
+
+_BAND_HEIGHT = {"no_wait": 2 / 12, "short": 6 / 12, "long": 11 / 12}
+
+
+def _real_typical(svc, location_id: int, on: dt.date) -> list[dict]:
+    bins: dict[str, list[float]] = {}
+    dates: set[dt.date] = set()
+    for r in svc.store.line_report_history(location_id):
+        at = dt.datetime.fromisoformat(r["created_at"]).replace(
+            tzinfo=dt.timezone.utc).astimezone(LOCAL_TZ)
+        if at.weekday() != on.weekday():
+            continue
+        dates.add(at.date())
+        key = f"{at.hour:02d}:{30 * (at.minute // 30):02d}"
+        bins.setdefault(key, []).append(_BAND_HEIGHT.get(r["band"], 0.0))
+    n = sum(len(v) for v in bins.values())
+    if n < REAL_TYPICAL_MIN_REPORTS or len(dates) < REAL_TYPICAL_MIN_DAYS:
+        return []
+    return [{"time": t, "busyness": sum(v) / len(v)}
+            for t, v in sorted(bins.items())]
+
+
+def _service_end_iso(location_id: int, served_on: str, meal: int) -> str | None:
+    try:
+        on = dt.date.fromisoformat(served_on)
+    except ValueError:
+        return None
+    end = service_ends_at(location_id, on, meal, LOCAL_TZ)
+    return None if end is None else end.isoformat(timespec="minutes")
 
 
 def _demo_sub(account) -> str:
@@ -514,6 +585,7 @@ def _register(app: APIFlask) -> None:
             "declaration_open": window[0],
             "declaration_closes_at": window[1],
             "service_status": window[2],
+            "service_ends_at": _service_end_iso(location, date, meal),
             "season_notice": _season_notice(
                 location, date, bool(served), bool(profile)
             ),
@@ -589,11 +661,18 @@ def _register(app: APIFlask) -> None:
                     stock = {"status": m["status"], "note": m["note"]}
                     break
 
+        your_note = None
+        if (user is not None and location is not None
+                and query_data.get("meal") is not None):
+            your_note = svc.store.feedback_of(
+                user.sub, recipe_id, location, _today(), query_data["meal"])
+
         return {
             **recipe,
             "availability": stock,
             "spice": {"level": spice.level, "curated": spice.curated, "basis": spice.basis},
             "your_rating": yours,
+            "your_feedback": your_note,
             "rating": None if rating is None else {
                 "average": rating.average, "count": rating.count,
                 "recent_average": rating.recent_average,
@@ -610,9 +689,24 @@ def _register(app: APIFlask) -> None:
     @app.get(f"{API}/line/<int:location_id>")
     @app.doc(tags=["signals"], summary="Current servery busyness (simulated)")
     def line_now(location_id: int):
-        r = _svc().lines.current(location_id)
+        svc = _svc()
+        latest = svc.store.latest_line_report(location_id)
+        if latest is not None:
+            fresh = (latest["band"] is not None
+                     and latest["expires_at"] > dt.datetime.utcnow().isoformat())
+            return {
+                "location": location_id,
+                "source": "staff",
+                "band": latest["band"] if fresh else None,
+                "reported_at": latest["created_at"] if fresh else None,
+                "expires_at": latest["expires_at"] if fresh else None,
+                "basis": "Reported by the kitchen; a report expires half an "
+                         "hour after it is made.",
+            }
+        r = svc.lines.current(location_id)
         return {
             "location": r.location_id,
+            "source": "simulated",
             "at": r.at.isoformat(timespec="minutes"),
             "wait_minutes": r.wait_minutes,
             "busyness": r.busyness,
@@ -627,12 +721,115 @@ def _register(app: APIFlask) -> None:
     @app.doc(tags=["signals"], summary="Historical busyness by time of day")
     def line_typical(location_id: int, query_data):
         on = _parse_date(query_data["date"])
-        series = _svc().lines.typical_day(location_id, on)
+        svc = _svc()
+        if svc.store.latest_line_report(location_id) is not None:
+            return {
+                "location": location_id, "date": on.isoformat(),
+                "weekday": on.strftime("%A"),
+                "series": _real_typical(svc, location_id, on),
+                "simulated": False,
+            }
+        series = svc.lines.typical_day(location_id, on)
         return {
             "location": location_id, "date": on.isoformat(),
             "weekday": on.strftime("%A"),
             "series": [{"time": t.strftime("%H:%M"), "busyness": v} for t, v in series],
             "simulated": True,
+        }
+
+    @app.post(f"{API}/line/<int:location_id>/report")
+    @staff_required
+    @app.input(LineReportIn)
+    @app.doc(tags=["signals"],
+             summary="Report the line as a band — expires in 30 minutes (staff)")
+    def line_report(location_id: int, json_data):
+        import app.main as _m
+        expires = (dt.datetime.utcnow()
+                   + dt.timedelta(minutes=_m.LINE_REPORT_TTL_MIN)).isoformat()
+        _svc().store.add_line_report(
+            location_id, json_data["band"], current_user().sub, expires)
+        return {"recorded": True, "band": json_data["band"],
+                "expires_at": expires}
+
+
+    @app.get(f"{API}/forecast")
+    @staff_required
+    @app.input(ForecastQuery, location="query")
+    @app.doc(tags=["forecast"],
+             summary="Production-planning view for one service (staff)")
+    def forecast_view(query_data):
+        svc = _svc()
+        location = query_data["location"]
+        meal = query_data["meal"]
+        served_on = query_data.get("date") or _today()
+        try:
+            on = dt.date.fromisoformat(served_on)
+        except ValueError:
+            abort(422, "Dates look like 2026-08-02.")
+
+        yes, no = svc.store.attendance_counts(location, served_on, meal)
+        sql_dow = str((on.weekday() + 1) % 7)
+        base_avg, base_days = svc.store.attendance_baseline(
+            location, sql_dow, meal, served_on)
+
+        weekday = on.strftime("%A")
+        variables = [
+            {"id": "declared", "label": "Declared intent",
+             "value": f"{yes} coming · {no} not coming",
+             "provenance": "live", "impact": None},
+            {"id": "history", "label": f"Prior {weekday}s",
+             "value": (f"avg {base_avg:.0f} declared over {base_days} "
+                       f"day{'s' if base_days != 1 else ''}"
+                       if base_days else None),
+             "provenance": "live" if base_days else "absent", "impact": None},
+            {"id": "weather", "label": "Weather",
+             "value": None, "provenance": "absent", "impact": None},
+            {"id": "calendar", "label": "Calendar effects",
+             "value": None, "provenance": "absent", "impact": None},
+            {"id": "swipes", "label": "Swipe history",
+             "value": None, "provenance": "absent", "impact": None},
+        ]
+
+        extremes = svc.store.rated_extremes(location, 3)
+        week_ago = (on - dt.timedelta(days=7)).isoformat()
+        wasted = svc.store.top_wasted(location, week_ago, 3)
+
+        day, _status = svc.dining.day_rows(served_on, location)
+        today_ids = {r["recipe"] for r in day if r.get("meal") == meal}
+        seen_before: set[int] = set()
+        for back in range(1, 7):
+            prior, _s = svc.dining.day_rows(
+                (on - dt.timedelta(days=back)).isoformat(), location)
+            seen_before |= {r["recipe"] for r in prior}
+        new_ids = sorted(today_ids - seen_before)[:6]
+
+        ids = sorted({*(r["recipe_id"] for r in extremes["top"]),
+                      *(r["recipe_id"] for r in extremes["bottom"]),
+                      *(r["recipe_id"] for r in wasted), *new_ids})[:150]
+        names = {rid: (rec or {}).get("name")
+                 for rid, rec in svc.dining.recipes(ids).items()}
+        for row in (*extremes["top"], *extremes["bottom"], *wasted):
+            row["name"] = names.get(row["recipe_id"])
+        new_ratings = svc.store.rating_summary(new_ids, location,
+                                               RATING_RECENT_DAYS)
+        new_items = [{
+            "recipe_id": rid, "name": names.get(rid),
+            "average": getattr(new_ratings.get(rid), "average", None),
+            "count": getattr(new_ratings.get(rid), "count", 0),
+        } for rid in new_ids]
+
+        return {
+            "location": location, "date": served_on, "meal": meal,
+            "declared": {"coming": yes, "not_coming": no,
+                         "provenance": "live"},
+            "baseline": {"average": base_avg, "days": base_days,
+                         "weekday": weekday,
+                         "provenance": "live" if base_days else "absent"},
+            "model": {"provenance": "absent"},
+            "variables": variables,
+            "rated": extremes,
+            "wasted": [{**w, "provenance": "simulated"} for w in wasted],
+            "new_items": new_items,
         }
 
     @app.get(f"{API}/houses")
@@ -702,7 +899,7 @@ def _register(app: APIFlask) -> None:
         changed = svc.store.add_rating(
             recipe_id=json_data["recipe_id"], score=json_data["score"],
             user_id=user.sub, location_id=location_id,
-            served_on=json_data.get("served_on"), comment=json_data.get("comment"),
+            served_on=json_data.get("served_on"),
             recent_days=RATING_RECENT_DAYS,
         )
         got = svc.store.rating_summary(
@@ -778,6 +975,7 @@ def _register(app: APIFlask) -> None:
                           if user.house_key in BY_KEY else None,
             "demo": user.demo,
             "kitchen": kitchen_unlocked(),
+            "feedback_paused": _svc().store.feedback_blocked(user.sub),
         }
 
     @app.post(f"{API}/auth/kitchen")
@@ -1014,6 +1212,91 @@ def _register(app: APIFlask) -> None:
             query_data["location"], query_data["recipe"], current_user().sub,
         )
         return {"cleared": cleared}
+
+
+    def _feedback_display_name(user) -> str:
+        parts = (user.name or "").split()
+        if not parts:
+            return "A student"
+        if len(parts) == 1:
+            return parts[0]
+        return f"{parts[0]} {parts[-1][0]}."
+
+    @app.post(f"{API}/feedback")
+    @app.input(FeedbackIn)
+    @login_required
+    @app.doc(tags=["feedback"],
+             summary="Tell the kitchen about a dish (requires sign-in)")
+    def add_feedback(json_data):
+        user = current_user()
+        svc = _svc()
+        if svc.store.feedback_blocked(user.sub):
+            abort(403, "Your feedback is valued, but sending from this "
+                       "account is paused right now. The pause can be "
+                       "temporary — ask at the servery if you have questions.")
+        text = json_data["text"].strip()
+        if not text:
+            abort(400, "The note is empty.")
+        location = json_data["location_id"]
+        meal = json_data["meal"]
+        recipe = json_data["recipe_id"]
+        today = _today()
+        day, _status = svc.dining.day_rows(today, location)
+        if not any(r.get("recipe") == recipe and r.get("meal") == meal
+                   for r in day):
+            abort(422, "That dish is not on today's menu at this hall.")
+        signed = bool(json_data["signed"])
+        changed = svc.store.upsert_feedback(
+            user_id=user.sub, recipe_id=recipe, location_id=location,
+            served_on=today, meal=meal, text=text, signed=signed,
+            signed_name=_feedback_display_name(user) if signed else None,
+            source=json_data["source"],
+        )
+        return {"recorded": True, "changed": changed}
+
+    @app.get(f"{API}/feedback")
+    @staff_required
+    @app.input(FeedbackQuery, location="query")
+    @app.doc(tags=["feedback"],
+             summary="Notes students sent the kitchen (staff)")
+    def feedback_inbox(query_data):
+        svc = _svc()
+        rows = svc.store.feedback_for_location(
+            query_data["location"], query_data.get("date") or _today())
+        ids = sorted({r["recipe_id"] for r in rows})[:150]
+        fetched = svc.dining.recipes(ids)
+        names = {rid: (rec or {}).get("name") for rid, rec in fetched.items()}
+        for r in rows:
+            r["name"] = names.get(r["recipe_id"])
+        return {"location": query_data["location"], "notes": rows}
+
+    @app.post(f"{API}/feedback/blocks")
+    @staff_required
+    @app.input(FeedbackBlockIn)
+    @app.doc(tags=["feedback"],
+             summary="Pause a note's author from feedback (staff, name-blind)")
+    def block_feedback_author(json_data):
+        svc = _svc()
+        author = svc.store.feedback_author(json_data["note_id"])
+        if author is None:
+            abort(404, "No such note.")
+        svc.store.set_feedback_block(
+            json_data["note_id"], author, current_user().sub,
+            json_data.get("reason"))
+        return {"blocked": True}
+
+    @app.delete(f"{API}/feedback/blocks")
+    @staff_required
+    @app.input(FeedbackBlockQuery, location="query")
+    @app.doc(tags=["feedback"],
+             summary="Reinstate a note's author (staff)")
+    def unblock_feedback_author(query_data):
+        svc = _svc()
+        author = svc.store.feedback_author(query_data["note_id"])
+        if author is None:
+            abort(404, "No such note.")
+        return {"unblocked": svc.store.clear_feedback_block(
+            query_data["note_id"], current_user().sub)}
 
 
     def _notify_user(svc, user_id: str, body: str, url: str = "/") -> None:

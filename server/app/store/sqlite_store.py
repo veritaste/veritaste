@@ -29,7 +29,6 @@ CREATE TABLE IF NOT EXISTS rating (
     location_id INTEGER NOT NULL,
     score       INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
     served_on   TEXT,
-    comment     TEXT,
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL,
     PRIMARY KEY (user_id, recipe_id, location_id)
@@ -196,6 +195,75 @@ CREATE TABLE IF NOT EXISTS grill_order (
 );
 CREATE INDEX IF NOT EXISTS idx_grill_open ON grill_order(location_id, status);
 CREATE INDEX IF NOT EXISTS idx_grill_user ON grill_order(user_id, status);
+
+-- Menu feedback: the app's one sanctioned free-text channel — student words
+-- to kitchen humans, never to reports. Latest note per (student, dish, hall,
+-- service) wins; every accepted version also lands in the history table.
+-- signed_name is captured at write time because a demo session's subject
+-- cannot be resolved to a name after the session dies.
+CREATE TABLE IF NOT EXISTS menu_feedback (
+    user_id     TEXT    NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    served_on   TEXT    NOT NULL,
+    meal        INTEGER NOT NULL,
+    text        TEXT    NOT NULL,
+    signed      INTEGER NOT NULL DEFAULT 0,
+    signed_name TEXT,
+    source      TEXT    NOT NULL DEFAULT 'sheet',
+    edited      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (user_id, recipe_id, location_id, served_on, meal)
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_hall
+    ON menu_feedback(location_id, served_on);
+CREATE TABLE IF NOT EXISTS menu_feedback_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    served_on   TEXT    NOT NULL,
+    meal        INTEGER NOT NULL,
+    text        TEXT    NOT NULL,
+    signed      INTEGER NOT NULL,
+    source      TEXT    NOT NULL,
+    at          TEXT    NOT NULL
+);
+-- Feedback moderation: one row per staff ACTION through one note — never
+-- keyed on the author across notes, because any per-author projection onto
+-- the inbox is a correlation channel that deanonymizes (found 2026-08-01:
+-- a user-keyed chip lit up every note an author had written). The author
+-- is paused while ANY active row points at them; the chip renders only on
+-- the note acted through. Per-note rows update in place so the latest
+-- transition stays auditable. Blocking is a staff act, never automatic.
+CREATE TABLE IF NOT EXISTS feedback_block (
+    note_id      INTEGER NOT NULL PRIMARY KEY,
+    user_id      TEXT    NOT NULL,
+    active       INTEGER NOT NULL DEFAULT 1,
+    reason       TEXT,
+    blocked_by   TEXT    NOT NULL,
+    blocked_at   TEXT    NOT NULL,
+    unblocked_by TEXT,
+    unblocked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_block_user
+    ON feedback_block(user_id, active);
+
+-- Staff line reports: append-only, the first real signal behind the line
+-- pillar. A hall that has EVER reported retires its simulation permanently
+-- (ruled 2026-08-01: real or nothing). Reports hard-expire ~30 minutes out —
+-- a stale "short line" is worse than silence. A NULL band is a retraction.
+CREATE TABLE IF NOT EXISTS line_report (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL,
+    band        TEXT CHECK (band IN ('no_wait','short','long') OR band IS NULL),
+    user_id     TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    expires_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_line_report_loc
+    ON line_report(location_id, id);
 """
 
 
@@ -297,7 +365,6 @@ class SqliteStore(Store):
         user_id: str,
         location_id: int,
         served_on: str | None,
-        comment: str | None,
         recent_days: int,
     ) -> bool:
         now = datetime.utcnow().isoformat()
@@ -310,22 +377,21 @@ class SqliteStore(Store):
             self._conn.execute(
                 """
                 INSERT INTO rating
-                    (user_id, recipe_id, location_id, score, served_on, comment,
+                    (user_id, recipe_id, location_id, score, served_on,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, recipe_id, location_id) DO UPDATE SET
                     score      = excluded.score,
                     served_on  = excluded.served_on,
-                    comment    = excluded.comment,
                     updated_at = excluded.updated_at
                 """,
-                (user_id, recipe_id, location_id, score, served_on, comment, now, now),
+                (user_id, recipe_id, location_id, score, served_on, now, now),
             )
             self._conn.execute(
                 "INSERT INTO rating_history "
-                "(user_id, recipe_id, location_id, score, served_on, comment, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (user_id, recipe_id, location_id, score, served_on, comment, now),
+                "(user_id, recipe_id, location_id, score, served_on, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, recipe_id, location_id, score, served_on, now),
             )
             self._conn.commit()
         return existing is not None
@@ -746,6 +812,205 @@ class SqliteStore(Store):
             (location_id, marked_on),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+    def upsert_feedback(self, user_id: str, recipe_id: int, location_id: int,
+                        served_on: str, meal: int, text: str, signed: bool,
+                        signed_name: str | None, source: str) -> bool:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            prior = self._conn.execute(
+                "SELECT 1 FROM menu_feedback WHERE user_id = ? AND "
+                "recipe_id = ? AND location_id = ? AND served_on = ? "
+                "AND meal = ?",
+                (user_id, recipe_id, location_id, served_on, meal),
+            ).fetchone() is not None
+            self._conn.execute(
+                """
+                INSERT INTO menu_feedback
+                    (user_id, recipe_id, location_id, served_on, meal,
+                     text, signed, signed_name, source, edited,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                ON CONFLICT(user_id, recipe_id, location_id, served_on, meal)
+                DO UPDATE SET
+                    text        = excluded.text,
+                    signed      = excluded.signed,
+                    signed_name = excluded.signed_name,
+                    source      = excluded.source,
+                    edited      = 1,
+                    updated_at  = excluded.updated_at
+                """,
+                (user_id, recipe_id, location_id, served_on, meal,
+                 text, int(signed), signed_name, source, now, now),
+            )
+            self._conn.execute(
+                "INSERT INTO menu_feedback_history "
+                "(user_id, recipe_id, location_id, served_on, meal, text, "
+                "signed, source, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, recipe_id, location_id, served_on, meal,
+                 text, int(signed), source, now),
+            )
+            self._conn.commit()
+        return prior
+
+    def feedback_for_location(self, location_id: int,
+                              served_on: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT f.rowid AS id, f.recipe_id, f.meal, f.text,
+                   CASE WHEN f.signed = 1 THEN f.signed_name END AS signed_name,
+                   f.source, f.edited, f.created_at, f.updated_at,
+                   CASE WHEN b.note_id IS NOT NULL
+                        THEN 1 ELSE 0 END AS blocked,
+                   (SELECT score FROM rating r
+                     WHERE r.user_id = f.user_id
+                       AND r.recipe_id = f.recipe_id
+                       AND r.location_id = f.location_id) AS rating_score
+            FROM menu_feedback f
+            LEFT JOIN feedback_block b
+                   ON b.note_id = f.rowid AND b.active = 1
+            WHERE f.location_id = ? AND f.served_on = ?
+            ORDER BY f.updated_at DESC
+            """,
+            (location_id, served_on),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def feedback_author(self, note_id: int) -> str | None:
+        row = self._conn.execute(
+            "SELECT user_id FROM menu_feedback WHERE rowid = ?", (note_id,),
+        ).fetchone()
+        return row["user_id"] if row else None
+
+    def feedback_of(self, user_id: str, recipe_id: int, location_id: int,
+                    served_on: str, meal: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT text, signed, source, edited, updated_at "
+            "FROM menu_feedback WHERE user_id = ? AND recipe_id = ? AND "
+            "location_id = ? AND served_on = ? AND meal = ?",
+            (user_id, recipe_id, location_id, served_on, meal),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def feedback_counts(self, served_on: str, meal: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT location_id, COUNT(*) AS notes, "
+            "COUNT(DISTINCT recipe_id) AS dishes "
+            "FROM menu_feedback WHERE served_on = ? AND meal = ? "
+            "GROUP BY location_id ORDER BY location_id",
+            (served_on, meal),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+    def add_line_report(self, location_id: int, band: str | None,
+                        user_id: str, expires_at: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO line_report "
+                "(location_id, band, user_id, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (location_id, band, user_id,
+                 datetime.utcnow().isoformat(), expires_at),
+            )
+            self._conn.commit()
+
+    def latest_line_report(self, location_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT band, created_at, expires_at FROM line_report "
+            "WHERE location_id = ? ORDER BY id DESC LIMIT 1",
+            (location_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def line_report_history(self, location_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT band, created_at FROM line_report "
+            "WHERE location_id = ? AND band IS NOT NULL ORDER BY id",
+            (location_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+    def attendance_baseline(self, location_id: int, sql_dow: str, meal: int,
+                            before: str) -> tuple[float | None, int]:
+        rows = self._conn.execute(
+            """
+            SELECT SUM(CASE WHEN attending = 1 THEN 1 ELSE 0 END) AS yes
+            FROM attendance_intent
+            WHERE location_id = ? AND meal = ? AND served_on < ?
+              AND strftime('%w', served_on) = ?
+            GROUP BY served_on ORDER BY served_on DESC LIMIT 8
+            """,
+            (location_id, meal, before, sql_dow),
+        ).fetchall()
+        if not rows:
+            return None, 0
+        return sum(r["yes"] for r in rows) / len(rows), len(rows)
+
+    def rated_extremes(self, location_id: int, limit: int) -> dict:
+        def _q(order: str) -> list[dict]:
+            return [dict(r) for r in self._conn.execute(
+                f"""
+                SELECT recipe_id, ROUND(AVG(score), 2) AS average,
+                       COUNT(*) AS count
+                FROM rating WHERE location_id = ?
+                GROUP BY recipe_id
+                ORDER BY AVG(score) {order}, COUNT(*) DESC
+                LIMIT ?
+                """,
+                (location_id, limit),
+            ).fetchall()]
+        return {"top": _q("DESC"), "bottom": _q("ASC")}
+
+    def top_wasted(self, location_id: int, since: str, limit: int) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            """
+            SELECT recipe_id, ROUND(SUM(wasted_lb), 1) AS wasted_lb,
+                   MAX(source) AS source
+            FROM waste_observation
+            WHERE location_id = ? AND served_on >= ?
+            GROUP BY recipe_id ORDER BY SUM(wasted_lb) DESC LIMIT ?
+            """,
+            (location_id, since, limit),
+        ).fetchall()]
+
+    def feedback_blocked(self, user_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM feedback_block WHERE user_id = ? AND active = 1 "
+            "LIMIT 1", (user_id,),
+        ).fetchone()
+        return row is not None
+
+    def set_feedback_block(self, note_id: int, user_id: str, blocked_by: str,
+                           reason: str | None) -> None:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO feedback_block
+                    (note_id, user_id, active, reason, blocked_by, blocked_at)
+                VALUES (?, ?, 1, ?, ?, ?)
+                ON CONFLICT(note_id) DO UPDATE SET
+                    active     = 1,
+                    reason     = excluded.reason,
+                    blocked_by = excluded.blocked_by,
+                    blocked_at = excluded.blocked_at
+                """,
+                (note_id, user_id, reason, blocked_by, now),
+            )
+            self._conn.commit()
+
+    def clear_feedback_block(self, note_id: int, unblocked_by: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE feedback_block SET active = 0, unblocked_by = ?, "
+                "unblocked_at = ? WHERE note_id = ? AND active = 1",
+                (unblocked_by, datetime.utcnow().isoformat(), note_id),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
 
 
     def grill_station(self, location_id: int, default_cap: int) -> dict:

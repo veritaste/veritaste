@@ -102,7 +102,6 @@ class Store(ABC):
         user_id: str,
         location_id: int,
         served_on: str | None,
-        comment: str | None,
         recent_days: int,
     ) -> bool:
         ...
@@ -234,6 +233,72 @@ class Store(ABC):
 
     @abstractmethod
     def stock_marks(self, location_id: int, marked_on: str) -> list[dict]:
+        ...
+
+
+    @abstractmethod
+    def upsert_feedback(self, user_id: str, recipe_id: int, location_id: int,
+                        served_on: str, meal: int, text: str, signed: bool,
+                        signed_name: str | None, source: str) -> bool:
+        ...
+
+    @abstractmethod
+    def feedback_for_location(self, location_id: int,
+                              served_on: str) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def feedback_author(self, note_id: int) -> str | None:
+        ...
+
+    @abstractmethod
+    def feedback_of(self, user_id: str, recipe_id: int, location_id: int,
+                    served_on: str, meal: int) -> dict | None:
+        ...
+
+    @abstractmethod
+    def feedback_counts(self, served_on: str, meal: int) -> list[dict]:
+        ...
+
+
+    @abstractmethod
+    def add_line_report(self, location_id: int, band: str | None,
+                        user_id: str, expires_at: str) -> None:
+        ...
+
+    @abstractmethod
+    def latest_line_report(self, location_id: int) -> dict | None:
+        ...
+
+    @abstractmethod
+    def line_report_history(self, location_id: int) -> list[dict]:
+        ...
+
+
+    @abstractmethod
+    def attendance_baseline(self, location_id: int, sql_dow: str, meal: int,
+                            before: str) -> tuple[float | None, int]:
+        ...
+
+    @abstractmethod
+    def rated_extremes(self, location_id: int, limit: int) -> dict:
+        ...
+
+    @abstractmethod
+    def top_wasted(self, location_id: int, since: str, limit: int) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def feedback_blocked(self, user_id: str) -> bool:
+        ...
+
+    @abstractmethod
+    def set_feedback_block(self, note_id: int, user_id: str, blocked_by: str,
+                           reason: str | None) -> None:
+        ...
+
+    @abstractmethod
+    def clear_feedback_block(self, note_id: int, unblocked_by: str) -> bool:
         ...
 
 

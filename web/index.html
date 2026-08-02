@@ -20,9 +20,10 @@
 
 <div class="idbar">
   <div class="idbar__in">
-    <div class="mark">
+    <a class="mark" id="brandHome" href="?"
+       aria-label="Veritaste — back to today's menu">
 
-      <svg width="30" height="30" viewBox="0 0 40 40" role="img" aria-label="Veritaste">
+      <svg width="30" height="30" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="19" fill="none" stroke="currentColor" stroke-width="2"/>
         <path d="M20 30 V17" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
         <path d="M20 18 C20 12, 15 10, 12.5 9.5 C12.5 14, 16 17.5, 20 18 Z" fill="currentColor"/>
@@ -30,7 +31,7 @@
               fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
       </svg>
       <div class="wordmark">Veri<span>taste</span></div>
-    </div>
+    </a>
     <div class="idbar__spacer"></div>
     <div class="idbar__who" id="who">
       <button class="linkbtn" id="signinBtn">Sign in</button>
@@ -179,6 +180,39 @@
   </div>
 </section>
 
+<section class="pane" id="pane-feedback" hidden>
+  <div class="card">
+    <div class="card__hd"><h2>Feedback</h2>
+      <span class="board__ctx" id="fbxContext"></span>
+      <button class="textlink" id="fbxRefresh">(refresh)</button></div>
+    <div class="card__bd">
+      <div class="fbx__chips" id="fbxChips"></div>
+      <p class="board__msg" id="fbxMsg" hidden></p>
+      <div id="fbxList"></div>
+    </div>
+  </div>
+</section>
+
+<section class="pane" id="pane-line" hidden>
+  <div class="card">
+    <div class="card__hd"><h2>Line length</h2>
+      <label class="hd-label" for="linrHall">Dining hall</label>
+      <select class="st-hall" id="linrHall"></select></div>
+    <div class="card__bd">
+      <p class="board__lockednote" id="linrLocked" hidden>Reporting the line
+        needs the kitchen unlock — <a href="/staffunlock">enter the
+        passcode</a> once on this browser.</p>
+      <div class="linr__bands" id="linrSeg">
+        <button data-band="no_wait">No wait</button>
+        <button data-band="short">Short</button>
+        <button data-band="long">Long</button>
+      </div>
+      <p class="linr__state" id="linrState"></p>
+      <p class="board__msg" id="linrMsg" hidden></p>
+    </div>
+  </div>
+</section>
+
 <section class="pane" id="pane-station" hidden>
   <div class="card station">
     <div class="card__hd"><h2>Grill Station</h2>
@@ -186,6 +220,53 @@
       <select class="st-hall" id="stationHall"></select></div>
     <div class="card__bd" id="stationBody">
       <div class="state" style="padding:20px 0">Loading the station…</div>
+    </div>
+  </div>
+</section>
+
+<section class="pane" id="pane-forecast" hidden>
+  <div class="controls">
+    <div class="field">
+      <label for="fcHall">Dining hall</label>
+      <select id="fcHall"></select>
+    </div>
+    <div class="field">
+      <label for="fcDate">Date</label>
+      <input type="date" id="fcDate">
+    </div>
+
+    <div class="seg" id="fcSeg" role="group" aria-label="Meal" hidden></div>
+  </div>
+  <p class="board__lockednote" id="fcLocked" hidden>Production numbers stay
+    inside the kitchen, so this pane needs the kitchen unlock —
+    <a href="/staffunlock?then=%2F%3Fpane%3Dforecast">enter the passcode</a>
+    once on this browser.</p>
+  <p class="board__msg" id="fcMsg" hidden></p>
+  <div class="fc" id="fcGrid" hidden>
+    <div class="card">
+      <div class="card__hd"><h2>Attendance</h2><span class="sim rep">live</span>
+        <span class="idbar__spacer"></span>
+        <button class="textlink" id="fcRefresh">(refresh)</button></div>
+      <div class="card__bd" id="fcAttend"></div>
+    </div>
+    <div class="card">
+      <div class="card__hd"><h2>Forecast inputs</h2></div>
+      <div class="card__bd" id="fcVars"></div>
+    </div>
+    <div class="card">
+      <div class="card__hd"><h2>Menu performance</h2></div>
+      <div class="card__bd" id="fcRated"></div>
+    </div>
+    <div style="display:grid; gap:22px">
+      <div class="card">
+        <div class="card__hd"><h2>Most wasted this week</h2>
+          <span class="sim">simulated</span></div>
+        <div class="card__bd" id="fcWasted"></div>
+      </div>
+      <div class="card">
+        <div class="card__hd"><h2>New on the menu</h2></div>
+        <div class="card__bd" id="fcNew"></div>
+      </div>
     </div>
   </div>
 </section>
@@ -201,6 +282,7 @@
         <p class="push__hint" id="pushHint"></p>
       </div>
     </div>
+
     <div class="card" id="acctWho">
       <div class="card__hd"><h2>Signed in as</h2></div>
       <div class="card__bd" id="acctWhoBody"></div>

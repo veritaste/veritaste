@@ -45,34 +45,60 @@ async function api(path, opts = {}) {
 
 const PANES = [
   { id: "menu",    label: "Menu",             roles: null },
-  { id: "grill",   label: "Order the grill",  roles: null },
 
-  { id: "where",   label: "Where can I eat?", staffLabel: "Interhouse rules", roles: null },
+  { id: "grill",   label: "Order the grill",  roles: null, hideFor: ["staff"] },
 
-  { id: "availability", label: "Availability Board", roles: ["staff"] },
+  { id: "where",   label: "Where can I eat?", staffLabel: "Interhouse rules",
+    roles: null, overflowFor: ["staff"] },
+
+  { id: "availability", label: "Availability board", roles: ["staff"] },
   { id: "station", label: "Grill station", roles: ["staff"] },
+  { id: "feedback", label: "Feedback", roles: ["staff"] },
+  { id: "line", label: "Line length", roles: ["staff"], overflowFor: ["staff"] },
+  { id: "forecast", label: "Forecast", roles: ["staff"], overflowFor: ["staff"] },
   { id: "account", label: "My account",       roles: null },
 ];
-
 function paneLabel(pane, user) {
   return (user && user.affiliation === "staff" && pane.staffLabel) || pane.label;
 }
+
+const STAFF_ORDER = ["menu", "availability", "station", "feedback",
+                     "line", "forecast", "where", "account"];
+
 function panesFor(user) {
   const role = user ? user.affiliation : null;
-  return PANES.filter(p => !p.roles || (role && p.roles.includes(role)));
+  const list = PANES.filter(p =>
+    (!p.roles || (role && p.roles.includes(role)))
+    && !(p.hideFor && role && p.hideFor.includes(role)));
+  if (role === "staff") {
+    const rank = id => {
+      const i = STAFF_ORDER.indexOf(id);
+      return i === -1 ? STAFF_ORDER.length : i;
+    };
+    list.sort((a, b) => rank(a.id) - rank(b.id));
+  }
+  return list;
 }
 
 function defaultPane(user) {
-  return user && user.affiliation === "staff" ? "menu" : "menu";
+
+  return "menu";
 }
 
 function renderNav() {
   const list = $("#navList");
   const available = panesFor(state.user);
+  const role = state.user ? state.user.affiliation : null;
   list.innerHTML = available.map(p =>
-    `<li><a href="?pane=${p.id}" data-pane="${p.id}"
+    `<li${p.overflowFor && role && p.overflowFor.includes(role)
+        ? ' data-overflow="1"' : ""}><a href="?pane=${p.id}" data-pane="${p.id}"
       ${p.id === state.pane ? 'aria-current="page"' : ""}
-      >${esc(paneLabel(p, state.user))}</a></li>`).join("");
+      >${esc(paneLabel(p, state.user))}</a></li>`).join("")
+    + `<li class="nav__more" id="navMore" hidden>
+        <button class="nav__morebtn" id="navMoreBtn" aria-haspopup="true"
+          aria-expanded="false" aria-label="More panes">…</button>
+        <ul class="nav__menu" id="navMenu"></ul>
+      </li>`;
 
   list.querySelectorAll("a").forEach(a =>
     a.addEventListener("click", e => {
@@ -81,10 +107,108 @@ function renderNav() {
       list.classList.remove("open");
       $("#navToggle").setAttribute("aria-expanded", "false");
     }));
+  $("#navMoreBtn").addEventListener("click", e => {
+    e.stopPropagation();
+    navMenuToggle();
+  });
 
   const current = available.find(p => p.id === state.pane);
   $("#navCurrent").textContent = current ? paneLabel(current, state.user) : "Menu";
+  navOverflow();
 }
+
+function navOverflow() {
+  const list = $("#navList");
+  const more = $("#navMore");
+  const menu = $("#navMenu");
+  if (!more) return;
+  const items = [...list.querySelectorAll("li:not(.nav__more)")];
+  items.forEach(li => { li.style.display = ""; });
+  navMenuClose();
+  more.hidden = true;
+  menu.innerHTML = "";
+  if (window.innerWidth < 620) return;
+
+  items.filter(li => li.hasAttribute("data-overflow")
+                     && !li.querySelector("a[aria-current]"))
+       .forEach(li => { li.style.display = "none"; });
+  const fits = () => list.scrollWidth <= list.clientWidth;
+  more.hidden = items.every(li => li.style.display !== "none") && fits();
+  let guard = items.length;
+  while (!fits() && guard--) {
+    const visible = items.filter(li => li.style.display !== "none");
+    if (visible.length <= 1) break;
+    let pick = visible[visible.length - 1];
+    if (pick.querySelector("a[aria-current]")) pick = visible[visible.length - 2];
+    if (!pick) break;
+    pick.style.display = "none";
+  }
+  const overflowed = items.filter(li => li.style.display === "none");
+  if (!overflowed.length) { more.hidden = true; return; }
+  more.hidden = false;
+  menu.innerHTML = overflowed.map(li => {
+    const a = li.querySelector("a");
+    return `<li><a href="${a.getAttribute("href")}" data-pane="${a.dataset.pane}"
+      ${a.hasAttribute("aria-current") ? 'aria-current="page"' : ""}
+      >${esc(a.textContent)}</a></li>`;
+  }).join("");
+  menu.querySelectorAll("a").forEach(a =>
+    a.addEventListener("click", e => {
+      e.preventDefault();
+      navMenuClose();
+      showPane(a.dataset.pane);
+    }));
+}
+
+function navMenuToggle() {
+  const menu = $("#navMenu");
+  const open = !menu.classList.contains("open");
+  menu.classList.toggle("open", open);
+  $("#navMoreBtn").setAttribute("aria-expanded", String(open));
+}
+
+function navMenuClose() {
+  $("#navMenu")?.classList.remove("open");
+  $("#navMoreBtn")?.setAttribute("aria-expanded", "false");
+}
+
+document.addEventListener("click", e => {
+  if (!e.target.closest(".nav__more")) navMenuClose();
+});
+window.addEventListener("resize", () => {
+  clearTimeout(state._navResize);
+  state._navResize = setTimeout(navOverflow, 120);
+});
+
+if (document.fonts?.ready) document.fonts.ready.then(() => navOverflow());
+
+function mealByClock() {
+  const now = new Date();
+  const h = now.getHours() + now.getMinutes() / 60;
+  return h < 10.5 ? 0 : h < 14.5 ? 1 : 2;
+}
+
+function goHome() {
+  if (state.dish != null) closeSheet({ pop: false });
+  state.date = localToday();
+  state.meal = mealByClock();
+  syncControls();
+  showPane("menu");
+  refreshContext();
+}
+$("#brandHome").addEventListener("click", e => { e.preventDefault(); goHome(); });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopLinePoll();
+    stopGrillPoll();
+  } else if (state.pane === "menu") {
+    loadLine();
+    startLinePoll();
+  } else if (state.pane === "grill") {
+    startGrillPoll();
+  }
+});
 
 function showPane(id, { push = true } = {}) {
   const available = panesFor(state.user);
@@ -98,6 +222,10 @@ function showPane(id, { push = true } = {}) {
   const pane = PANES.find(p => p.id === id);
   if (pane) document.title = `${paneLabel(pane, state.user)} — Veritaste`;
   if (id === "availability") loadBoard();
+  if (id === "feedback") loadFeedbackPane();
+  if (id === "line") loadLinePane();
+  if (id === "forecast") loadForecastPane();
+  if (id === "menu") startLinePoll(); else stopLinePoll();
   if (id === "grill") startGrillPoll(); else stopGrillPoll();
   if (id === "station") startStationPoll(); else stopStationPoll();
   if (push) writeUrl();
@@ -131,8 +259,7 @@ function syncControls() {
     b.setAttribute("aria-pressed", String(Number(b.dataset.meal) === state.meal)));
 }
 
-function renderMealSeg(options) {
-  const seg = $("#mealSeg");
+function renderMealSeg(options, seg = $("#mealSeg")) {
 
   if (!options || !options.length)
     options = MEALS.map((name, m) => ({ meal: m, name, served: true }));
@@ -149,18 +276,19 @@ function refreshContext() {
   updateRsvpCopy();
   return Promise.all([loadMenu(), loadLine(), loadInterhouse()]);
 }
+
 window.addEventListener("popstate", async () => {
   const u = readUrl();
   const contextMoved =
     (u.hall != null && u.hall !== state.hall) ||
     (u.date && u.date !== state.date) ||
     (u.meal != null && u.meal !== state.meal);
+
   if (u.hall != null) state.hall = u.hall;
   if (u.date) state.date = u.date;
   if (u.meal != null) state.meal = u.meal;
   showPane(u.pane || "menu", { push: false });
   syncControls();
-
   if (contextMoved) await refreshContext();
 
   if (u.dish != null && u.dish !== state.dish) {
@@ -208,6 +336,7 @@ function signIn() {
 
   window.location.href = "/signin";
 }
+
 async function loadMe() {
   try {
     const me = await api("/me");
@@ -235,6 +364,7 @@ function renderAccount() {
   const rows = [["Name", state.user.name]];
   if (state.user.house_name) rows.push(["House", state.user.house_name]);
   rows.push(["Role", staff ? "HUDS staff" : "Undergraduate"]);
+
   box.innerHTML = rows.map(([k, v]) =>
     `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")
     + `<p style="margin:14px 0 0;font-size:12.5px;color:var(--ink-mute)">
@@ -244,7 +374,6 @@ function renderAccount() {
 
 async function loadWallet() {
   const card = $("#walletCard");
-
   if (!state.user || state.user.affiliation !== "student") {
     card.hidden = true;
     return;
@@ -313,6 +442,7 @@ function renderPush() {
   $("#pushLead").textContent = state.user.affiliation === "staff"
     ? "Just pre-prep alerts when yesterday's waste needs a decision — nothing else."
     : "Just reminders to tell the kitchen your plans — nothing else.";
+
   paintPushControl();
 
   if (notify.message) $("#pushHint").textContent = notify.message;
@@ -322,9 +452,7 @@ function paintPushControl() {
   const act = $("#pushAct"), hint = $("#pushHint");
   act.innerHTML = "";
   hint.textContent = "";
-
   if (!notify.supported) {
-
     act.innerHTML = `<span class="push__off">Not available in this browser</span>`;
     hint.textContent = /iPad|iPhone|iPod/.test(navigator.userAgent)
       ? "On iPhone, notifications work once Veritaste is on your Home Screen: tap Share, then Add to Home Screen, and open it from there."
@@ -333,6 +461,7 @@ function paintPushControl() {
   }
 
   if (Notification.permission === "denied") {
+
     act.innerHTML = `<span class="push__off">Blocked in your browser</span>
       <button class="btn ghost" id="pushOn">Try again</button>`;
     $("#pushOn").addEventListener("click", enablePush);
@@ -397,6 +526,7 @@ async function enablePush() {
     renderPush();
   }
 }
+
 async function disablePush() {
   notify.message = "";
   try {
@@ -423,6 +553,7 @@ async function previewPush() {
     if (r.sent) {
       toast("Sent — check your notifications.");
     } else {
+
       notify.message = r.reason
         ? `The push service refused it: ${r.reason}`
         : "The push service rejected it. Turning notifications off and on again "
@@ -487,6 +618,7 @@ function dishRow(it) {
     <div class="dish__go">&rsaquo;</div>
   </button>`;
 }
+
 async function loadMenu() {
   const box = $("#menu");
   box.innerHTML = `<div class="state"><div class="spin"></div>Loading menu…</div>`;
@@ -497,10 +629,11 @@ async function loadMenu() {
     data = await api(`/menu?date=${state.date}&location=${state.hall}&meal=${state.meal}`);
   } catch (e) {
     box.innerHTML = `<div class="state">Couldn't load the menu.<br><small>${esc(e.message)}</small></div>`;
-
+    state.mealOptions = null;
     updateContextNotices(null);
     return;
   }
+
   const options = data.meal_options || [];
   if (!state.correctingMeal && options.length &&
       !options.some(o => o.meal === state.meal)) {
@@ -511,8 +644,16 @@ async function loadMenu() {
     try { await refreshContext(); } finally { state.correctingMeal = false; }
     return;
   }
-
   renderMealSeg(options);
+
+  state.mealOptions = options;
+  if (state.pane === "forecast") {
+    renderMealSeg(options, $("#fcSeg"));
+
+    if (state.forecast && (state.forecast.meal !== state.meal
+        || state.forecast.location !== state.hall
+        || state.forecast.date !== state.date)) loadForecastPane();
+  }
 
   state.items.clear();
   data.categories.forEach(c => c.items.forEach(i => state.items.set(i.id, i)));
@@ -541,18 +682,84 @@ async function loadMenu() {
     return;
   }
 
-  box.innerHTML = [...data.categories]
-    .sort((a, b) => catRank(a.name) - catRank(b.name) || a.name.localeCompare(b.name))
-    .map(c => `<div class="cat"><h3>${esc(c.name)}${
-      c.name.trim().toLowerCase() === "from the grill"
-        ? ` <button class="textlink" data-grillgo>(order from the grill)</button>`
-        : ""}</h3>${c.items.map(dishRow).join("")}</div>`)
-    .join("");
+  const memKey = `menuOpen:${state.hall}:${state.meal}:${state.date}`;
+  const stored = sessionStorage.getItem(memKey);
+  let openSet;
+  try { openSet = stored === null ? null : new Set(JSON.parse(stored)); }
+  catch { openSet = null; }
+
+  const cats = [...data.categories]
+    .sort((a, b) => catRank(a.name) - catRank(b.name) || a.name.localeCompare(b.name));
+
+  if (openSet === null) {
+    openSet = new Set();
+    let showing = 0;
+    for (const c of cats) {
+      if (showing >= 10) break;
+      openSet.add(c.name.trim().toLowerCase());
+      showing += c.items.length;
+    }
+  }
+
+  box.innerHTML = `<div class="cat-tools">
+      <button class="textlink" data-catall>${
+        cats.every(c => openSet.has(c.name.trim().toLowerCase()))
+          ? "Close all" : "Open all"}</button></div>`
+    + cats.map(c => {
+      const key = c.name.trim().toLowerCase();
+      const isOpen = openSet.has(key);
+      const out = c.items.filter(i => i.availability?.status === "out").length;
+      const low = c.items.filter(i => i.availability?.status === "low").length;
+      return `<div class="cat${isOpen ? " open" : ""}" data-cat="${esc(key)}">
+        <div class="cat__hd">
+          <button class="cat__toggle" aria-expanded="${isOpen}">
+            <span class="cat__chev" aria-hidden="true"></span>
+            <h3>${esc(c.name)}</h3>
+            <span class="cat__meta">${
+              out ? `<span class="cat__out">${out} out</span>` : ""}${
+              low ? `<span class="cat__low">${low} low</span>` : ""}
+              <span class="cat__n">${c.items.length}</span></span>
+          </button>
+          ${key === "from the grill"
+            ? `<button class="textlink" data-grillgo>(order from the grill)</button>`
+            : ""}
+        </div>
+        <div class="cat__bd"${isOpen ? "" : " hidden"}>${
+          c.items.map(dishRow).join("")}</div>
+      </div>`;
+    }).join("");
+
+  const persistOpen = () => sessionStorage.setItem(memKey, JSON.stringify(
+    [...box.querySelectorAll(".cat.open")].map(d => d.dataset.cat)));
+
+  box.querySelectorAll(".cat__hd").forEach(hd =>
+    hd.addEventListener("click", e => {
+      if (e.target.closest("[data-grillgo]")) return;
+      const cat = hd.closest(".cat");
+      const t = hd.querySelector(".cat__toggle");
+      const nowOpen = !cat.classList.contains("open");
+      cat.classList.toggle("open", nowOpen);
+      t.setAttribute("aria-expanded", String(nowOpen));
+      cat.querySelector(".cat__bd").hidden = !nowOpen;
+      persistOpen();
+    }));
+  box.querySelector("[data-catall]")?.addEventListener("click", e => {
+    const openAll = e.target.textContent === "Open all";
+    box.querySelectorAll(".cat").forEach(cat => {
+      cat.classList.toggle("open", openAll);
+      cat.querySelector(".cat__toggle")
+         .setAttribute("aria-expanded", String(openAll));
+      cat.querySelector(".cat__bd").hidden = !openAll;
+    });
+    e.target.textContent = openAll ? "Close all" : "Open all";
+    persistOpen();
+  });
 
   box.querySelector("[data-grillgo]")
     ?.addEventListener("click", () => showPane("grill"));
   box.querySelectorAll(".dish").forEach(b =>
     b.addEventListener("click", () => openSheet(Number(b.dataset.id))));
+
   updateContextNotices(data);
 
   if (state.pane === "availability") renderBoard();
@@ -591,17 +798,15 @@ function updateContextNotices(data) {
   } else {
     $("#hint").style.display = "none";
   }
+
   state.rsvpVisible = hasMenu && (!data || data.takes_attendance !== false);
   state.declarationOpen = !data || data.declaration_open !== false;
   state.serviceStatus = (data && data.service_status) || null;
   renderRsvp();
-
   state.hallOpenToday = known ? mealsServed.length > 0 : null;
   renderLineCard();
 }
-
 const GRILL_POLL_MS = 5000;
-
 const GRILL_WHY = {
   not_serving: "This hall isn't serving right now.",
   closed: "The grill is closed to app orders right now.",
@@ -613,6 +818,17 @@ const GRILL_WHY = {
             + "come down and order at the counter.",
 };
 
+const LINE_POLL_MS = 60000;
+
+function startLinePoll() {
+  if (!state.lineTimer)
+    state.lineTimer = setInterval(loadLine, LINE_POLL_MS);
+}
+
+function stopLinePoll() {
+  if (state.lineTimer) { clearInterval(state.lineTimer); state.lineTimer = null; }
+}
+
 function startGrillPoll() {
   loadGrill();
   if (!state.grillTimer) state.grillTimer = setInterval(loadGrill, GRILL_POLL_MS);
@@ -620,11 +836,36 @@ function startGrillPoll() {
 function stopGrillPoll() {
   if (state.grillTimer) { clearInterval(state.grillTimer); state.grillTimer = null; }
 }
+
+async function serveryOptions() {
+  if (!state.serveryHalls) {
+    try {
+      const h = await api("/houses");
+      state.serveryHalls = new Set(h.houses.map(x => x.location_id));
+      state.serveryHalls.add(30);
+    } catch { return $("#hall").innerHTML; }
+  }
+  return [...$("#hall").options]
+    .filter(o => state.serveryHalls.has(Number(o.value)))
+    .map(o => `<option value="${o.value}">${esc(o.textContent)}</option>`)
+    .join("");
+}
+
+function snapToServery(sel) {
+  if (state.serveryHalls && !state.serveryHalls.has(state.hall)
+      && sel.options.length) {
+    state.hall = Number(sel.options[0].value);
+    writeUrl();
+    refreshContext();
+  }
+  sel.value = String(state.hall);
+}
+
 async function loadGrill() {
 
   const sel = $("#grillHall");
   if (!sel.options.length) {
-    sel.innerHTML = $("#hall").innerHTML;
+    sel.innerHTML = await serveryOptions();
     sel.addEventListener("change", () => {
       state.hall = Number(sel.value);
       syncControls();
@@ -634,7 +875,7 @@ async function loadGrill() {
       loadGrill();
     });
   }
-  sel.value = String(state.hall);
+  snapToServery(sel);
   let g;
   try { g = await api(`/grill?location=${state.hall}`); }
   catch (e) {
@@ -645,6 +886,14 @@ async function loadGrill() {
   if (raw === state.grillRaw) return;
   state.grillRaw = raw;
   state.grill = g;
+
+  const ost = g.your_order?.status || null;
+  if (window.veritasteShell && ost && state.grillOrderStatus
+      && ost !== state.grillOrderStatus
+      && (ost === "cooking" || ost === "ready")) {
+    window.veritasteShell.notify("Veritaste", g.your_order.message);
+  }
+  state.grillOrderStatus = ost;
   renderGrill();
 }
 
@@ -673,7 +922,7 @@ function renderGrill() {
         }${elsewhere}</div>
         <div class="gsteps">${steps.map((s, i) => `
           <span class="gstep${i < at ? " on" : ""}${i === at ? " now" : ""}"
-            >${s}</span>`).join("")}</div>
+            >${s === "seen" ? "queued" : s}</span>`).join("")}</div>
         ${o.cancellable
           ? `<button class="btn ghost" id="grillCancel">Cancel this order</button>`
           : ""}
@@ -716,6 +965,7 @@ function renderGrill() {
       .filter(Boolean);
 
     const counter = reasons.includes("station_offline")
+        && !reasons.includes("paused") && !reasons.includes("wait_cap")
       ? `<p class="grill-status">If the grill is open, you may place an
            order at the counter instead.</p>` : "";
     box.innerHTML = `<p class="grill-status">${esc(why[0] || "The grill is not taking app orders.")}</p>`
@@ -725,6 +975,7 @@ function renderGrill() {
              g.open_app_orders === 1 ? "" : "s"} on the grill right now.</p>` : "");
     return;
   }
+
   if (!g.mains.length) {
     box.innerHTML = `<p class="grill-status">The grill isn't open during
       this meal.</p>`;
@@ -768,7 +1019,6 @@ function renderGrill() {
         data-sheet="${i.id}">(details)</button>` : ""}
     </div>`;
   };
-
   const selMain = g.mains.find(m => m.id === state.grillSel.main);
   const conds = selMain
     ? g.condiments.filter(c => (selMain.condiments || []).includes(c.id))
@@ -826,7 +1076,6 @@ function grillMsg(text) {
 }
 
 const STATION_POLL_MS = 3000;
-
 function startStationPoll() {
   loadStation();
   if (!state.stationTimer)
@@ -845,7 +1094,7 @@ async function loadStation() {
 
   const sel = $("#stationHall");
   if (!sel.options.length) {
-    sel.innerHTML = $("#hall").innerHTML;
+    sel.innerHTML = await serveryOptions();
     sel.addEventListener("change", () => {
       state.hall = Number(sel.value);
       syncControls();
@@ -855,7 +1104,7 @@ async function loadStation() {
       loadStation();
     });
   }
-  sel.value = String(state.hall);
+  snapToServery(sel);
 
   if (!state.user.kitchen) {
     stopStationPoll();
@@ -886,6 +1135,7 @@ const _STATION_ACT = {
   cooking: ["ready", "Ready"],
   ready: ["collected", "Collected"],
 };
+
 function renderStation() {
   const st = state.station;
   const box = $("#stationBody");
@@ -955,6 +1205,226 @@ function renderStation() {
   box.querySelectorAll("[data-scancel]").forEach(b =>
     b.addEventListener("click", act(() => api(`/grill/orders/${b.dataset.scancel}`, {
       method: "DELETE" }))));
+}
+
+const LINE_BANDS = { no_wait: "No wait", short: "Short", long: "Long" };
+
+async function loadLinePane() {
+  if (!state.user || state.user.affiliation !== "staff") return;
+
+  const sel = $("#linrHall");
+  if (!sel.options.length) {
+    sel.innerHTML = await serveryOptions();
+    sel.addEventListener("change", () => {
+      state.hall = Number(sel.value);
+      syncControls();
+      writeUrl();
+      refreshContext();
+      loadLinePane();
+    });
+  }
+  snapToServery(sel);
+  try { state.lineReport = await api(`/line/${state.hall}`); }
+  catch { state.lineReport = null; }
+  renderLinePane();
+  if (!state.linrWired) {
+    state.linrWired = true;
+    $("#linrSeg").querySelectorAll("button").forEach(b =>
+      b.addEventListener("click", () => sendLineReport(b.dataset.band)));
+  }
+}
+
+function renderLinePane() {
+  const r = state.lineReport;
+  const fresh = r && r.source === "staff" && r.band;
+
+  const locked = !(state.user && state.user.kitchen);
+  $("#linrLocked").hidden = !locked;
+  $("#linrSeg").style.display = locked ? "none" : "";
+  $("#linrState").style.display = locked ? "none" : "";
+  $("#linrSeg").querySelectorAll("button").forEach(b =>
+    b.setAttribute("aria-pressed", String(!!fresh && r.band === b.dataset.band)));
+  clearInterval(state.linrTimerId);
+  const el = $("#linrState");
+  if (fresh) {
+    el.innerHTML = `Expires in <b class="linr__timer" id="linrTimer"></b>
+      <a href="#" id="linrClear">Clear now</a>`;
+    $("#linrClear").addEventListener("click", e => {
+      e.preventDefault(); sendLineReport(null);
+    });
+
+    linrTick();
+    state.linrTimerId = setInterval(linrTick, 1000);
+    if (state.linrPulse) {
+      state.linrPulse = false;
+
+      const timer = $("#linrTimer");
+      timer.classList.add("linr__timer--reset");
+      setTimeout(() => timer.classList.remove("linr__timer--reset"), 600);
+    }
+  } else {
+    el.textContent = "No current report.";
+  }
+}
+function linrTick() {
+  const r = state.lineReport;
+  const t = $("#linrTimer");
+  if (!t || !r || !r.expires_at) { clearInterval(state.linrTimerId); return; }
+  const left = new Date(String(r.expires_at).slice(0, 19) + "Z") - Date.now();
+  if (left <= 0) {
+    clearInterval(state.linrTimerId);
+    loadLinePane();
+    loadLine();
+    return;
+  }
+  const m = Math.floor(left / 60000);
+  const s = Math.floor((left % 60000) / 1000);
+  t.textContent = `${m}:${String(s).padStart(2, "0")}`;
+}
+
+async function sendLineReport(band) {
+  try {
+    await api(`/line/${state.hall}/report`, { method: "POST", body: { band } });
+    $("#linrMsg").hidden = true;
+
+    state.linrPulse = true;
+  } catch (e) {
+    $("#linrMsg").hidden = false;
+    $("#linrMsg").innerHTML = e.status === 403 && !state.user?.kitchen
+      ? `Reporting needs the kitchen unlock —
+         <a href="/staffunlock">enter the passcode</a> once on this browser.`
+      : esc(e.message);
+  }
+  await loadLinePane();
+
+  loadLine();
+}
+
+const FBX_MEALS = { all: "All", 0: "Breakfast", 1: "Lunch", 2: "Dinner" };
+
+function fbxTime(iso) {
+
+  const d = new Date(String(iso).slice(0, 19) + "Z");
+  return Number.isNaN(d.getTime()) ? "" :
+    d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function relAgo(iso) {
+  const ms = Date.now() - new Date(String(iso).slice(0, 19) + "Z");
+  const m = Math.round(ms / 60000);
+  if (!Number.isFinite(m) || m <= 0) return "just now";
+  return m === 1 ? "1 minute ago" : `${m} minutes ago`;
+}
+
+async function loadFeedbackPane() {
+  if (!state.user || state.user.affiliation !== "staff") return;
+  if (!state.fbxWired) {
+    state.fbxWired = true;
+    state.fbxMeal = "all";
+    $("#fbxRefresh").addEventListener("click", loadFeedbackPane);
+  }
+  const hallName = $("#hall").selectedOptions[0]?.textContent || `hall ${state.hall}`;
+  $("#fbxContext").textContent = hallName;
+  try {
+    const data = await api(`/feedback?location=${state.hall}`);
+    state.fbxNotes = data.notes;
+    $("#fbxMsg").hidden = true;
+  } catch (e) {
+    state.fbxNotes = null;
+    $("#fbxMsg").hidden = false;
+    $("#fbxMsg").innerHTML = e.status === 403 && !state.user.kitchen
+      ? `Reading students' notes needs the kitchen unlock —
+         <a href="/staffunlock">enter the passcode</a> once on this browser.`
+      : esc(e.message);
+  }
+  renderFbx();
+}
+
+function renderFbx() {
+  const chips = $("#fbxChips");
+  chips.innerHTML = Object.entries(FBX_MEALS).map(([k, label]) =>
+    `<button data-k="${k}"
+      aria-pressed="${String(k) === String(state.fbxMeal)}">${label}</button>`).join("");
+  chips.querySelectorAll("button").forEach(b =>
+    b.addEventListener("click", () => { state.fbxMeal = b.dataset.k; renderFbx(); }));
+
+  const box = $("#fbxList");
+  const notes = state.fbxNotes;
+  if (!notes) { box.innerHTML = ""; return; }
+  const shown = notes.filter(n =>
+    state.fbxMeal === "all" || n.meal === Number(state.fbxMeal));
+  if (!shown.length) {
+    box.innerHTML = `<p class="fbx__empty">No feedback.</p>`;
+    return;
+  }
+
+  const groups = new Map();
+  for (const n of shown) {
+    const key = n.name || `Dish ${n.recipe_id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(n);
+  }
+  box.innerHTML = [...groups.entries()].map(([dish, list]) => `
+    <div class="fbx__group">
+      <h3 class="fbx__dish">${esc(dish)}</h3>
+      ${list.map(fbxRow).join("")}
+    </div>`).join("");
+  box.querySelectorAll("[data-fbx-block]").forEach(b =>
+    b.addEventListener("click", e => {
+      e.preventDefault(); fbxConfirm(Number(b.dataset.fbxBlock));
+    }));
+  box.querySelectorAll("[data-fbx-unblock]").forEach(b =>
+    b.addEventListener("click", e => {
+      e.preventDefault();
+      fbxAct(() => api(`/feedback/blocks?note_id=${b.dataset.fbxUnblock}`,
+                       { method: "DELETE" }));
+    }));
+}
+
+function fbxRow(n) {
+  const meta = [
+    fbxTime(n.updated_at),
+    FBX_MEALS[n.meal] ?? `Meal ${n.meal}`,
+    n.signed_name ? esc(n.signed_name) : "Anonymous",
+    n.rating_score != null ? `rated ${n.rating_score} of 5` : null,
+    n.edited ? "(edited)" : null,
+  ].filter(Boolean).join(" · ");
+  return `<div class="fbx__note">
+    <p class="fbx__text">${esc(n.text)}</p>
+    <div class="fbx__meta">${meta}
+      ${n.blocked
+        ? `<span class="fbx__blocked">blocked</span>
+           <a href="#" data-fbx-unblock="${n.id}">Unblock</a>`
+        : `<a href="#" data-fbx-block="${n.id}">Block author</a>`}
+    </div>
+    <div class="fbx__confirm" id="fbxConfirm-${n.id}" hidden></div>
+  </div>`;
+}
+
+function fbxConfirm(noteId) {
+  const el = $(`#fbxConfirm-${noteId}`);
+  if (!el) return;
+  const link = el.parentElement.querySelector("[data-fbx-block]");
+  if (link) link.hidden = true;
+  el.hidden = false;
+  el.innerHTML = `Block this author from feedback?
+    <button class="btn" data-c="cancel">Cancel</button>
+    <button class="btn" data-c="block">Block</button>`;
+  el.querySelector('[data-c="cancel"]').addEventListener("click", e => {
+    e.preventDefault(); el.hidden = true; el.innerHTML = "";
+    if (link) link.hidden = false;
+  });
+  el.querySelector('[data-c="block"]').addEventListener("click", e => {
+    e.preventDefault();
+    fbxAct(() => api("/feedback/blocks",
+                     { method: "POST", body: { note_id: noteId } }));
+  });
+}
+
+async function fbxAct(fn) {
+  try { await fn(); $("#fbxMsg").hidden = true; }
+  catch (e) { $("#fbxMsg").hidden = false; $("#fbxMsg").textContent = e.message; }
+  await loadFeedbackPane();
 }
 
 async function loadBoard() {
@@ -1075,7 +1545,6 @@ function renderBoard() {
     b.addEventListener("click", () => boardAct(() =>
       api(`/availability?location=${state.hall}&recipe=${b.dataset.restock}`,
           { method: "DELETE" }))));
-
   renderBoardItems();
 }
 
@@ -1116,6 +1585,156 @@ function renderBoardItems() {
         status: "out" } }))));
 }
 
+async function forecastHallOptions() {
+  await serveryOptions();
+  if (!state.serveryHalls) return $("#hall").innerHTML;
+  const ok = new Set(state.serveryHalls);
+  ok.add(29);
+  return [...$("#hall").options]
+    .filter(o => ok.has(Number(o.value)))
+    .map(o => `<option value="${o.value}">${esc(o.textContent)}</option>`)
+    .join("");
+}
+
+async function loadForecastPane() {
+  if (!state.user || state.user.affiliation !== "staff") return;
+  const sel = $("#fcHall");
+  if (!state.fcWired) {
+    state.fcWired = true;
+    sel.innerHTML = await forecastHallOptions();
+    sel.addEventListener("change", () => {
+      state.hall = Number(sel.value);
+      syncControls();
+      writeUrl();
+      refreshContext();
+      loadForecastPane();
+    });
+    $("#fcDate").addEventListener("change", e => {
+      state.date = e.target.value;
+      syncControls();
+      writeUrl();
+      refreshContext();
+      loadForecastPane();
+    });
+
+    $("#fcSeg").addEventListener("click", e => {
+      const b = e.target.closest("button[data-meal]");
+      if (!b || Number(b.dataset.meal) === state.meal) return;
+      state.meal = Number(b.dataset.meal);
+      renderMealSeg(state.mealOptions, $("#fcSeg"));
+      syncControls();
+      writeUrl();
+      refreshContext();
+      loadForecastPane();
+    });
+    $("#fcRefresh").addEventListener("click", () => loadForecastPane());
+  }
+
+  if (state.serveryHalls && state.hall !== 29
+      && !state.serveryHalls.has(state.hall) && sel.options.length) {
+    state.hall = Number(sel.options[0].value);
+    writeUrl();
+    refreshContext();
+  }
+  sel.value = String(state.hall);
+  $("#fcDate").value = state.date;
+  renderMealSeg(state.mealOptions, $("#fcSeg"));
+
+  let f;
+  try {
+    f = await api(`/forecast?location=${state.hall}&meal=${state.meal}&date=${state.date}`);
+  } catch (e) {
+
+    $("#fcGrid").hidden = true;
+    const locked = e.status === 403 && !state.user.kitchen;
+    $("#fcLocked").hidden = !locked;
+    $("#fcMsg").hidden = locked;
+    if (!locked) $("#fcMsg").textContent = e.message;
+    return;
+  }
+  $("#fcLocked").hidden = true;
+  $("#fcMsg").hidden = true;
+  state.forecast = f;
+  renderForecast();
+}
+
+function fcChip(p, id) {
+  if (p === "live") return `<span class="sim rep">live</span>`;
+  if (p === "simulated") return `<span class="sim">simulated</span>`;
+  return `<span class="sim off">${id === "history" ? "no data yet" : "not connected"}</span>`;
+}
+
+function fcDishRow(r, extra) {
+  return `<button class="fcrow" data-fc="${r.recipe_id}">
+    <span class="fcrow__name">${esc(r.name || `Dish ${r.recipe_id}`)}</span>
+    ${extra}
+    <span class="dish__go">&rsaquo;</span>
+  </button>`;
+}
+
+function fcStars(r) {
+  return r.average != null
+    ? `<span class="stars">★ ${r.average} <span style="color:var(--ink-mute)">(${r.count})</span></span>`
+    : `<span class="fcrow__val" style="color:var(--ink-mute)">not yet rated</span>`;
+}
+
+function renderForecast() {
+  const f = state.forecast;
+  $("#fcGrid").hidden = false;
+
+  const base = f.baseline;
+  $("#fcAttend").innerHTML = `
+    <div class="fcnums">
+      <div class="fcnum"><b>${f.declared.coming}</b><span>declared coming</span></div>
+      <div class="fcnum"><b>${f.declared.not_coming}</b><span>declared not coming</span></div>
+    </div>
+    <p class="fchint" style="margin:0 0 10px">Declarations are a floor, not a headcount.</p>
+    <div class="stat"><span>Prior ${esc(base.weekday)}s here</span>
+      <b>${base.days
+        ? `avg ${Math.round(base.average)} declared &middot; ${base.days} date${base.days === 1 ? "" : "s"}`
+        : "none recorded yet"}</b></div>
+    <p class="fchint">No predicted total appears until a real forecast model runs.</p>`;
+
+  $("#fcVars").innerHTML = `
+    <div class="fvar fvar--hd" aria-hidden="true">
+      <span>Input</span><span>Data</span><span>Impact</span></div>
+    ${f.variables.map(v => `
+      <div class="fvar">
+        <span class="fvar__label">${esc(v.label)}</span>
+        ${fcChip(v.provenance, v.id)}
+        <b class="fvar__imp">${v.impact == null ? "&mdash;" : esc(String(v.impact))}</b>
+        ${v.value ? `<span class="fvar__val">${esc(v.value)}</span>` : ""}
+      </div>`).join("")}`;
+
+  const top = f.rated.top || [];
+  const topIds = new Set(top.map(r => r.recipe_id));
+  const bottom = (f.rated.bottom || []).filter(r => !topIds.has(r.recipe_id));
+  $("#fcRated").innerHTML = !top.length
+    ? `<p class="board__empty">No ratings at this hall yet.</p>`
+    : `<div class="sec" style="margin-top:0"><h4>Highest rated here</h4>
+        ${top.map(r => fcDishRow(r, fcStars(r))).join("")}</div>
+      <div class="sec"><h4>Lowest rated here</h4>
+        ${bottom.length
+          ? bottom.map(r => fcDishRow(r, fcStars(r))).join("")
+          : `<p class="board__empty">Too few rated dishes to split highest from lowest.</p>`}</div>`;
+
+  $("#fcWasted").innerHTML = (f.wasted || []).length
+    ? f.wasted.map(w => fcDishRow(w,
+        `<b class="fcrow__val">${Number(w.wasted_lb)} lb</b>`)).join("")
+      + `<p class="fchint">A Winnow-shaped mock feed — a real bin feed would
+          drop in unchanged.</p>`
+    : `<p class="board__empty">No waste observations in the week before this date.</p>`;
+
+  $("#fcNew").innerHTML = (f.new_items || []).length
+    ? f.new_items.map(n => fcDishRow(n,
+        `<span class="chip new">New</span>${fcStars(n)}`)).join("")
+      + `<p class="fchint">First time on this hall's menu in the past six days.</p>`
+    : `<p class="board__empty">Nothing new.</p>`;
+
+  $("#fcGrid").querySelectorAll("[data-fc]").forEach(btn =>
+    btn.addEventListener("click", () => openSheet(Number(btn.dataset.fc))));
+}
+
 const NUTRI = [
   ["total_fat", "Total Fat"], ["sat_fat", "Saturated Fat"], ["trans_fat", "Trans Fat"],
   ["cholesterol", "Cholesterol"], ["sodium", "Sodium"], ["total_carb", "Total Carbohydrate"],
@@ -1133,8 +1752,11 @@ async function openSheet(id, { push = true } = {}) {
 
   let r;
 
-  try { r = await api(`/recipes/${id}?location=${state.hall}`); }
+  const mealQ = state.meal != null ? `&meal=${state.meal}` : "";
+  try { r = await api(`/recipes/${id}?location=${state.hall}${mealQ}`); }
   catch (e) { $("#shBody").innerHTML = `<div class="state">${esc(e.message)}</div>`; return; }
+  state.sheetNote = r.your_feedback || null;
+  state.fbSource = null;
 
   $("#shTitle").textContent = r.name;
   const rows = NUTRI.map(([k, label]) => {
@@ -1145,6 +1767,8 @@ async function openSheet(id, { push = true } = {}) {
   }).join("");
 
   const signedOut = !state.user;
+
+  const fbToday = state.date === localToday();
   const shAvail = r.availability
     ? (r.availability.note
        || (r.availability.status === "out" ? "Ran out for this service."
@@ -1163,7 +1787,6 @@ async function openSheet(id, { push = true } = {}) {
     })}
     ${(r.allergens || []).length === 0
       ? `<span class="chip plain">No top-9 allergens listed</span>` : ""}</div>
-
     ${r.consumption ? `<div class="sec">
       <h4>Waste record <span class="sim">mock feed</span></h4>
       <p style="margin:0;font-size:14px;color:var(--ink-soft)">
@@ -1185,13 +1808,30 @@ async function openSheet(id, { push = true } = {}) {
       </div>
       <div id="rateMsg" style="font-size:13.5px;color:var(--ink-mute)">
         ${signedOut
-          ? `Reading is open to everyone. <a href="#" id="sheetSignin">Sign in</a> to rate — feedback is attributed so the kitchen can trust it.`
+          ? `Reading is open to everyone. <a href="#" id="sheetSignin">Sign in</a> to rate.`
           : r.your_rating
 
             ? `You rated this ${r.your_rating}. Choosing again replaces it — one rating per dish, per hall.`
             : `Your rating goes to the kitchen that cooked it.`}
       </div>
     </div>
+
+    ${fbToday && state.meal != null ? `<div class="sec" id="fbSec">
+      <h4>Tell the kitchen about this dish</h4>
+      ${signedOut
+        ? `<div class="fb__note">Notes here go to the kitchen that cooks this
+            dish. <a href="#" id="fbSignin">Sign in</a> to tell them.</div>`
+        : state.user.feedback_paused
+
+          ? `${state.sheetNote
+                ? `<p class="fb__sent">${esc(state.sheetNote.text)}</p>` : ""}
+             <div class="fb__paused">Your feedback is valued, but sending from
+              this account is paused right now. The pause can be temporary —
+              ask at the servery if you have questions.</div>`
+          : state.sheetNote ? fbSentHtml(state.sheetNote)
+          : `<div class="fb__note fb__collapsed">
+              <a href="#" id="fbOpen">(add a note for the kitchen)</a></div>`}
+    </div>` : ""}
 
     ${r.ingredients ? `<div class="sec"><h4>Ingredients</h4>
       <div class="ingred">${esc(r.ingredients)}</div></div>` : ""}
@@ -1210,7 +1850,92 @@ async function openSheet(id, { push = true } = {}) {
     $("#sheetRate").querySelectorAll("button").forEach(b =>
       b.addEventListener("click", () => submitRating(id, Number(b.dataset.v), b)));
   }
+  wireFeedback(id);
   $("#shClose").focus();
+}
+
+function fbFieldHtml(prefill = "", signed = false) {
+  return `
+    <textarea id="fbText" maxlength="500" rows="3"
+      placeholder="What should the kitchen know about this dish?">${esc(prefill)}</textarea>
+    <div class="fb__row">
+      <label class="fb__sign"><input type="checkbox" id="fbSign"${signed ? " checked" : ""}>
+        Put my name on this note (for kitchen staff to see)</label>
+      <span class="fb__count" id="fbCount" hidden></span>
+    </div>
+    <div class="fb__row">
+      <button class="btn" id="fbSend">Send note</button>
+      <span class="fb__msg" id="fbMsg" role="status"></span>
+    </div>`;
+}
+
+function fbSentHtml(note) {
+  return `<p class="fb__sent">${esc(note.text)}</p>
+    <div class="fb__meta">Sent to the kitchen${note.signed ? ", signed" : ""}.
+      <a href="#" id="fbEdit">(edit note)</a></div>`;
+}
+
+function fbExpand(recipeId, focus = true) {
+  const sec = $("#fbSec");
+  if (!sec) return;
+  if ($("#fbText")) { if (focus) $("#fbText").focus(); return; }
+  const closed = sec.querySelector(".fb__collapsed");
+  if (!closed) return;
+  closed.remove();
+  sec.insertAdjacentHTML("beforeend", fbFieldHtml());
+  wireFeedback(recipeId);
+  if (focus) $("#fbText").focus();
+}
+
+function wireFeedback(recipeId) {
+  $("#fbSignin")?.addEventListener("click", e => { e.preventDefault(); signIn(); });
+  $("#fbOpen")?.addEventListener("click", e => {
+    e.preventDefault(); state.fbSource = "sheet"; fbExpand(recipeId, true);
+  });
+  $("#fbEdit")?.addEventListener("click", e => {
+    e.preventDefault();
+    const sec = $("#fbSec");
+    sec.querySelector(".fb__sent")?.remove();
+    sec.querySelector(".fb__meta")?.remove();
+    sec.insertAdjacentHTML("beforeend",
+      fbFieldHtml(state.sheetNote?.text || "", !!state.sheetNote?.signed));
+    wireFeedback(recipeId);
+    $("#fbText").focus();
+  });
+  const ta = $("#fbText");
+  if (!ta) return;
+  ta.addEventListener("input", () => {
+    const left = 500 - ta.value.length;
+    const c = $("#fbCount");
+    c.hidden = left > 100;
+    c.textContent = `${left} left`;
+  });
+  $("#fbSend").addEventListener("click", () => submitFeedback(recipeId));
+}
+async function submitFeedback(recipeId) {
+  const msg = $("#fbMsg");
+  const text = $("#fbText").value.trim();
+  if (!text) { msg.textContent = "Nothing to send yet."; return; }
+  const btn = $("#fbSend");
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    await api("/feedback", { method: "POST", body: {
+      recipe_id: recipeId, location_id: state.hall, meal: state.meal,
+      text, signed: $("#fbSign").checked, source: state.fbSource || "sheet",
+    } });
+    state.sheetNote = { text, signed: $("#fbSign").checked };
+    state.fbSource = null;
+    const sec = $("#fbSec");
+    sec.querySelectorAll("textarea, .fb__row").forEach(el => el.remove());
+    sec.insertAdjacentHTML("beforeend", fbSentHtml(state.sheetNote));
+    wireFeedback(recipeId);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Send note";
+
+    msg.textContent = e.message || "Couldn't send — try again.";
+  }
 }
 
 async function submitRating(recipeId, score, btn) {
@@ -1226,6 +1951,11 @@ async function submitRating(recipeId, score, btn) {
       `${r.changed ? "Updated" : "Recorded"}. Now averaging ${r.average} from `
       + `${r.count} rating${r.count === 1 ? "" : "s"} here.`
       + creditSuffix(r.reward);
+
+    if (!state.sheetNote && !(state.user && state.user.feedback_paused)) {
+      state.fbSource = "rating";
+      fbExpand(recipeId, false);
+    }
     const it = state.items.get(recipeId);
     if (it) { it.rating = { average: r.average, count: r.count }; loadMenuRowChips(recipeId); }
     if (r.reward && r.reward.granted_cents) loadWallet();
@@ -1234,6 +1964,7 @@ async function submitRating(recipeId, score, btn) {
       ? "Session expired — sign in again." : `Couldn't save: ${e.message}`;
   }
 }
+
 function loadMenuRowChips(recipeId) {
   const row = document.querySelector(`.dish[data-id="${recipeId}"] .chips`);
   const it = state.items.get(recipeId);
@@ -1252,13 +1983,41 @@ function closeSheet({ pop = true } = {}) {
 function renderLineCard() {
   const now = state.line;
   const seasonClosed = state.hallOpenToday === false;
+
+  if (!seasonClosed && now && now.source === "staff") {
+    $("#lineDetail").style.display = "";
+    $("#lineTypical").style.display = "none";
+    const chip = $("#lineSim");
+    chip.style.display = "";
+    chip.textContent = "KITCHEN-REPORTED";
+    chip.classList.add("rep");
+    const words = { no_wait: "No wait", short: "Short line", long: "Long line" };
+    if (now.band) {
+      $("#waitNow").textContent = words[now.band] || now.band;
+      $("#waitSub").textContent =
+        `Reported by the kitchen ${relAgo(now.reported_at)}`;
+      const lit = { no_wait: 2, short: 6, long: 11 }[now.band] || 0;
+      const cls = { no_wait: "lo", short: "mid", long: "hi" }[now.band];
+      $("#gauge").innerHTML = Array.from({ length: 12 },
+        (_, i) => `<i class="${i < lit ? "on " + cls : ""}"></i>`).join("");
+    } else {
+      $("#waitNow").textContent = "No report";
+      $("#waitSub").textContent =
+        "The kitchen hasn't reported the line recently.";
+      $("#gauge").innerHTML = Array.from({ length: 12 },
+        () => "<i></i>").join("");
+    }
+    return;
+  }
+  const simChip = $("#lineSim");
+  simChip.textContent = "SIMULATED";
+  simChip.classList.remove("rep");
   const closed = seasonClosed || (now && now.busyness === 0);
 
   $("#lineDetail").style.display = closed ? "none" : "";
 
   $("#lineTypical").style.display = seasonClosed ? "none" : "";
   $("#lineSim").style.display = seasonClosed ? "none" : "";
-
   if (closed) {
     $("#waitNow").textContent = "Closed";
     $("#waitSub").textContent = "Not serving at the moment";
@@ -1277,15 +2036,18 @@ function renderLineCard() {
   $("#gauge").innerHTML = Array.from({ length: 12 },
     (_, i) => `<i class="${i < lit ? "on " + cls : ""}"></i>`).join("");
 }
-
 async function loadLine() {
   try {
-    const [now, typical] = await Promise.all([
-      api(`/line/${state.hall}`),
-      api(`/line/${state.hall}/typical?date=${state.date}`),
-    ]);
+    const now = await api(`/line/${state.hall}`);
     state.line = now;
     renderLineCard();
+    const typical = await api(`/line/${state.hall}/typical?date=${state.date}`);
+
+    if (!typical.series || !typical.series.length) {
+      $("#lineTypical").style.display = "none";
+      return;
+    }
+    if (state.hallOpenToday !== false) $("#lineTypical").style.display = "";
 
     const series = typical.series;
     const peak = Math.max(...series.map(s => s.busyness), 0.01);
@@ -1357,6 +2119,7 @@ async function loadInterhouse() {
         <div class="ih__why">${esc(labels[h.access])} — ${esc(h.reason)}</div>
       </div>
     </div>`).join("");
+
   const when = `${data.meal_name.toLowerCase()} on ${esc(data.weekday)}`;
   const who = isStaff
     ? `Access rules in force for ${when}, as they apply to a student from another House:`
@@ -1381,6 +2144,7 @@ function rsvpQuestion() {
   const meal = (state.mealName || MEALS[state.meal] || "").toLowerCase();
   return `Eating at ${hall} for ${meal}?`;
 }
+
 function updateRsvpCopy() {
   renderRsvp();
 
@@ -1419,6 +2183,7 @@ function markRsvp(attending) {
   $("#yesBtn").setAttribute("aria-pressed", String(attending === true));
   $("#noBtn").setAttribute("aria-pressed", String(attending === false));
 }
+
 async function declare(attending) {
   if (!state.user) { signIn(); return; }
   try {
@@ -1491,6 +2256,7 @@ async function init() {
     const open = list.classList.toggle("open");
     $("#navToggle").setAttribute("aria-expanded", String(open));
   });
+
   $("#yesBtn").addEventListener("click", () => declare(true));
   $("#noBtn").addEventListener("click", () => declare(false));
   $("#scrim").addEventListener("click", () => closeSheet());
@@ -1498,6 +2264,7 @@ async function init() {
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && state.dish != null) closeSheet();
   });
+
   await loadMe();
   showPane(state.pane, { push: false });
   initPush();
@@ -1505,5 +2272,4 @@ async function init() {
 
   if (u.dish != null) openSheet(u.dish, { push: false });
 }
-
 init();

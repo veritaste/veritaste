@@ -67,7 +67,8 @@ function render(marks) {
       <span class="tag ${m.status}">${m.status === "out" ? "Out" : "Low"}</span>
       <span class="name">${esc(m.name || `Dish ${m.recipe_id}`)}</span>
       ${m.note ? `<span class="note">${esc(m.note)}</span>` : ""}
-    </div>`).join("") + `</div>`;
+    </div>`).join("") + `</div>
+    <div class="elsefine">Everything else is serving.</div>`;
 }
 
 function renderDemand() {
@@ -88,7 +89,8 @@ function renderDemand() {
     <div class="tile__no">${no} not coming</div>
     <div class="tile__cutoff">${context.open
       ? `Declarations close ${esc(fmtTime(context.closes))}`
-      : "Declarations are closed for this service"}</div>`;
+      : "Declarations are closed for this service"}</div>
+    <div class="tile__floor">Declarations are a floor, not a headcount.</div>`;
 }
 
 async function refreshServiceContext() {
@@ -101,9 +103,24 @@ async function refreshServiceContext() {
       takes: m.takes_attendance !== false,
       open: m.declaration_open !== false,
       closes: m.declaration_closes_at,
+      ends: m.service_ends_at,
+      status: m.service_status,
     };
   } catch {  }
   renderDemand();
+  renderSvc();
+}
+
+function renderSvc() {
+  const el = $("#svc");
+  if (!context || !context.meal_name) { el.textContent = ""; return; }
+  let line = context.meal_name;
+  if (context.ends) {
+    line += context.status === "over"
+      ? ` · ended ${fmtTime(context.ends)}`
+      : ` · closes ${fmtTime(context.ends)}`;
+  }
+  el.textContent = line;
 }
 
 let lastGrill = null;

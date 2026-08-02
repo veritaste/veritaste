@@ -1,0 +1,19 @@
+# Veritaste — close-of-service feedback digest (oneshot; the timer drives it).
+#
+# Install on the droplet:
+#   cp deploy/veritaste-digest.service deploy/veritaste-digest.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now veritaste-digest.timer
+
+[Unit]
+Description=Veritaste close-of-service feedback digest
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=veritaste
+Group=veritaste
+WorkingDirectory=/srv/veritaste/server
+EnvironmentFile=/etc/veritaste.env
+Environment=VERITASTE_DB=/srv/veritaste/veritaste.db
+ExecStart=/srv/veritaste/.venv/bin/python /srv/veritaste/server/send_digest.py

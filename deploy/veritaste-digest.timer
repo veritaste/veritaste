@@ -1,0 +1,15 @@
+# Fires a few minutes after each service ends (Boston wall clock). The script
+# itself re-checks which service just ended and exits quietly otherwise, so a
+# delayed or duplicate firing never sends a stale digest.
+
+[Unit]
+Description=Veritaste digest at each close of service
+
+[Timer]
+OnCalendar=*-*-* 10:35:00 America/New_York
+OnCalendar=*-*-* 14:05:00 America/New_York
+OnCalendar=*-*-* 19:35:00 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target
