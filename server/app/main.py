@@ -26,7 +26,8 @@ from .config import (CACHE_TTL_HOURS, DB_PATH, DEMO_MODE, ECS_APIKEY,
                      GRILL_WAIT_CAP_MIN, LOCAL_TZ,
                      MODE, RATING_RECENT_DAYS, STAFF_PASSCODE, STORE_BACKEND,
                      TIMEZONE, UNLOCK_WINDOW_S, WEB_DIR)
-from .reference.grill import GRILL_CATEGORY, condiment_ids_for, split_grill
+from .reference.grill import (GRILL_CATEGORY, condiment_ids_for,
+                              default_condiment_ids_for, split_grill)
 from .reference.meals import service_ends_at
 from .rewards import (DAILY_CAP_CENTS, DAY_SCOPED, GRANTS, LABELS,
                       format_cents, settlement_note)
@@ -41,6 +42,12 @@ from .store import PushSub, build_store
 API = "/api/v1"
 
 LINE_REPORT_TTL_MIN = 30
+
+QUEUE_CAP = 6
+QUEUE_NEW_DAYS = 14
+QUEUE_SERVED_DAYS = 7
+QUEUE_MIN_RATINGS = 5
+INTENT_FRESH_DAYS = 14
 
 DISCLAIMER = (
     "This is not affiliated with or endorsed by Harvard University or HUDS."
@@ -156,6 +163,27 @@ class ForecastQuery(Schema):
     location = Integer(required=True)
     meal = Integer(required=True, validate=Range(min=0))
     date = String(load_default=None, allow_none=True)
+
+
+class IntentIn(Schema):
+    recipe_id = Integer(required=True)
+    location_id = Integer(required=True)
+    intent = String(required=True, allow_none=True,
+                    validate=OneOf(["try", "skip"]))
+
+
+class QueuePickIn(Schema):
+    location_id = Integer(required=True)
+    recipe_id = Integer(required=True)
+
+
+class QueueQuery(Schema):
+    location = Integer(required=True)
+
+
+class QueuePickClearQuery(Schema):
+    location = Integer(required=True)
+    recipe = Integer(required=True)
 
 
 class GrillQuery(Schema):
@@ -381,7 +409,8 @@ def staff_required(view):
     return wrapper
 
 
-_unlock_gate = {"t": -1e9}
+def _client_ip() -> str:
+    return request.headers.get("X-Real-IP") or request.remote_addr or "?"
 
 
 def _grill_serving_meal(location: int) -> int | None:
@@ -522,7 +551,8 @@ def create_app() -> APIFlask:
             return None
         if not request.path.startswith(API):
             return None
-        if request.headers.get("x-api-key") != ECS_APIKEY:
+        if not hmac.compare_digest(
+                request.headers.get("x-api-key", ""), ECS_APIKEY):
             abort(401, "Missing or invalid gateway credential.")
         return None
 
@@ -832,6 +862,139 @@ def _register(app: APIFlask) -> None:
             "new_items": new_items,
         }
 
+
+    def _queue_candidates(svc, location: int, today: dt.date):
+        first_seen: dict[int, str] = {}
+        last_seen: dict[int, str] = {}
+        seen_before: set[int] = set()
+        recent: set[int] = set()
+        for back in range(2 * QUEUE_NEW_DAYS):
+            day = (today - dt.timedelta(days=back)).isoformat()
+            rows, _status = svc.dining.day_rows(day, location)
+            for r in rows:
+                rid = r["recipe"]
+                if back < QUEUE_NEW_DAYS:
+                    first_seen[rid] = day
+                    last_seen.setdefault(rid, day)
+                    if back < QUEUE_SERVED_DAYS:
+                        recent.add(rid)
+                else:
+                    seen_before.add(rid)
+        new_ids = [rid for rid in first_seen if rid not in seen_before]
+        return first_seen, last_seen, recent, new_ids
+
+    @app.get(f"{API}/rating-queue")
+    @app.input(QueueQuery, location="query")
+    @app.doc(tags=["feedback"],
+             summary="A short list of dishes worth rating at this hall")
+    def rating_queue(query_data):
+        svc = _svc()
+        location = query_data["location"]
+        today = dt.date.fromisoformat(_today())
+        first_seen, last_seen, recent, new_ids = _queue_candidates(
+            svc, location, today)
+
+        picks = svc.store.queue_picks(location)
+        vetoes = svc.store.queue_vetoes(location)
+        maybe = sorted({*(p["recipe_id"] for p in picks), *new_ids, *recent})
+        summaries = svc.store.rating_summary(maybe[:150], location,
+                                             RATING_RECENT_DAYS)
+        recent_count = lambda rid: getattr(
+            summaries.get(rid), "recent_count", 0) or 0
+
+        ordered: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for p in picks:
+            if p["recipe_id"] not in seen:
+                ordered.append((p["recipe_id"], "staff"))
+                seen.add(p["recipe_id"])
+        for rid in sorted(new_ids, key=lambda r: first_seen[r], reverse=True):
+            if rid not in seen and rid not in vetoes:
+                ordered.append((rid, "new"))
+                seen.add(rid)
+        underrated = [rid for rid in recent
+                      if rid not in vetoes
+                      and recent_count(rid) < QUEUE_MIN_RATINGS]
+        underrated.sort(key=lambda r: last_seen.get(r, ""), reverse=True)
+        underrated.sort(key=recent_count)
+        for rid in underrated:
+            if rid not in seen:
+                ordered.append((rid, "recent"))
+                seen.add(rid)
+        ordered = ordered[:QUEUE_CAP]
+
+        ids = [rid for rid, _ in ordered]
+        names = {rid: (rec or {}).get("name")
+                 for rid, rec in svc.dining.recipes(ids).items()}
+
+        user = current_user()
+        fresh = (dt.datetime.utcnow()
+                 - dt.timedelta(days=INTENT_FRESH_DAYS)).isoformat()
+        your_ratings = (svc.store.user_ratings_for(user.sub, ids, location)
+                        if user else {})
+        your_intents = (svc.store.dish_intents_for(user.sub, ids, location,
+                                                   fresh) if user else {})
+        staff = bool(user and user.affiliation == "staff")
+        counts = (svc.store.intent_counts(location, ids, fresh)
+                  if staff else {})
+
+        items = []
+        for rid, reason in ordered:
+            s = summaries.get(rid)
+            it = {
+                "recipe_id": rid, "name": names.get(rid), "reason": reason,
+                "average": getattr(s, "average", None),
+                "count": getattr(s, "count", 0) or 0,
+                "your_rating": your_ratings.get(rid),
+                "your_intent": your_intents.get(rid),
+            }
+            if staff:
+                it["intents"] = counts.get(rid, {"try": 0, "skip": 0})
+            items.append(it)
+        return {"location": location, "date": today.isoformat(),
+                "cap": QUEUE_CAP, "items": items}
+
+    @app.post(f"{API}/intents")
+    @login_required
+    @app.input(IntentIn)
+    @app.doc(tags=["feedback"],
+             summary="Would try / would skip a dish (requires sign-in)")
+    def set_intent(json_data):
+        user = current_user()
+        svc = _svc()
+        rid, location = json_data["recipe_id"], json_data["location_id"]
+        if json_data["intent"] is not None and svc.store.has_rating(
+                user.sub, rid, location):
+            abort(400, "You've rated this dish here — your rating already "
+                       "says more than a would-try.")
+        svc.store.set_dish_intent(user.sub, rid, location,
+                                  json_data["intent"])
+        return {"recorded": True, "recipe_id": rid,
+                "intent": json_data["intent"]}
+
+    @app.post(f"{API}/rating-queue/picks")
+    @staff_required
+    @app.input(QueuePickIn)
+    @app.doc(tags=["feedback"],
+             summary="Push a dish into the rating queue (staff)")
+    def add_queue_pick(json_data):
+        _svc().store.add_queue_pick(
+            json_data["location_id"], json_data["recipe_id"],
+            current_user().sub)
+        return {"ok": True, "recipe_id": json_data["recipe_id"]}
+
+    @app.delete(f"{API}/rating-queue/items")
+    @staff_required
+    @app.input(QueuePickClearQuery, location="query")
+    @app.doc(tags=["feedback"],
+             summary="Take a dish out of the survey (staff)")
+    def remove_queue_item(query_data):
+        svc = _svc()
+        loc, rid = query_data["location"], query_data["recipe"]
+        removed = svc.store.remove_queue_pick(loc, rid)
+        svc.store.add_queue_veto(loc, rid, current_user().sub)
+        return {"ok": True, "removed_pick": removed, "vetoed": True}
+
     @app.get(f"{API}/houses")
     @app.doc(tags=["reference"], summary="Houses and the servery each uses")
     def houses():
@@ -889,8 +1052,8 @@ def _register(app: APIFlask) -> None:
 
 
     @app.post(f"{API}/ratings")
-    @app.input(RatingIn)
     @login_required
+    @app.input(RatingIn)
     @app.doc(tags=["feedback"], summary="Rate a dish (requires sign-in)")
     def add_rating(json_data):
         user = current_user()
@@ -920,8 +1083,8 @@ def _register(app: APIFlask) -> None:
         }, 201
 
     @app.post(f"{API}/attendance")
-    @app.input(AttendanceIn)
     @login_required
+    @app.input(AttendanceIn)
     @app.doc(tags=["feedback"],
              summary="Declare whether you are coming (requires sign-in)")
     def set_attendance(json_data):
@@ -985,12 +1148,10 @@ def _register(app: APIFlask) -> None:
     def kitchen_unlock(json_data):
         if not STAFF_PASSCODE:
             abort(503, "Staff access is not configured on this server.")
-        now = time.monotonic()
-        wait = UNLOCK_WINDOW_S - (now - _unlock_gate["t"])
+        wait = _svc().store.throttle_unlock(_client_ip(), UNLOCK_WINDOW_S)
         if wait > 0:
             abort(429, f"One attempt every {UNLOCK_WINDOW_S} seconds — "
-                       f"try again in {int(wait) + 1}s.")
-        _unlock_gate["t"] = now
+                       f"try again in {wait}s.")
         supplied = hashlib.sha256(json_data["passcode"].encode()).digest()
         expected = hashlib.sha256(STAFF_PASSCODE.encode()).digest()
         if not hmac.compare_digest(supplied, expected):
@@ -1036,7 +1197,8 @@ def _register(app: APIFlask) -> None:
             "demo": True, "mode": MODE,
         })
         resp.set_cookie(SESSION_COOKIE, issue_session(user),
-                        httponly=True, samesite="Lax", max_age=12 * 3600)
+                        httponly=True, samesite="Lax", max_age=12 * 3600,
+                        secure=request.is_secure, path="/")
         return resp
 
     @app.post(f"{API}/auth/signout")
@@ -1049,7 +1211,7 @@ def _register(app: APIFlask) -> None:
                 store.delete_push_sub(sub.endpoint)
 
         resp = jsonify({"signed_in": False})
-        resp.delete_cookie(SESSION_COOKIE)
+        resp.delete_cookie(SESSION_COOKIE, path="/")
         return resp
 
 
@@ -1095,8 +1257,8 @@ def _register(app: APIFlask) -> None:
         return {"enabled": push.enabled(), "public_key": push.public_key()}
 
     @app.post(f"{API}/push/subscriptions")
-    @app.input(PushSubIn)
     @login_required
+    @app.input(PushSubIn)
     @app.doc(tags=["notifications"], summary="Register this browser for notifications")
     def push_subscribe(json_data):
         if not push.enabled():
@@ -1110,11 +1272,12 @@ def _register(app: APIFlask) -> None:
         return {"subscribed": True}, 201
 
     @app.delete(f"{API}/push/subscriptions")
-    @app.input(PushEndpointIn, location="query")
     @login_required
+    @app.input(PushEndpointIn, location="query")
     @app.doc(tags=["notifications"], summary="Unsubscribe this browser")
     def push_unsubscribe(query_data):
-        _svc().store.delete_push_sub(query_data["endpoint"])
+        _svc().store.delete_push_sub_for_user(
+            query_data["endpoint"], current_user().sub)
         return {"subscribed": False}
 
     @app.post(f"{API}/push/test")
@@ -1223,8 +1386,8 @@ def _register(app: APIFlask) -> None:
         return f"{parts[0]} {parts[-1][0]}."
 
     @app.post(f"{API}/feedback")
-    @app.input(FeedbackIn)
     @login_required
+    @app.input(FeedbackIn)
     @app.doc(tags=["feedback"],
              summary="Tell the kitchen about a dish (requires sign-in)")
     def add_feedback(json_data):
@@ -1431,6 +1594,8 @@ def _register(app: APIFlask) -> None:
         mains, condiments = split_grill(items)
         for m in mains:
             m["condiments"] = condiment_ids_for(m["name"], condiments)
+            m["default_condiments"] = default_condiment_ids_for(
+                m["name"], condiments)
         user = current_user()
         mine = svc.store.user_open_grill_order(user.sub) if user else None
         walk_up = "walk_up" in (snap["why_not"] or [])
@@ -1460,8 +1625,8 @@ def _register(app: APIFlask) -> None:
         }
 
     @app.post(f"{API}/grill/orders")
-    @app.input(GrillOrderIn)
     @login_required
+    @app.input(GrillOrderIn)
     @app.doc(tags=["grill"], summary="Order from the grill (requires sign-in)")
     def place_grill(json_data):
         svc = _svc()

@@ -1,0 +1,19 @@
+# Veritaste — student last-call reminder (oneshot; the timer drives it).
+# BUILT DARK: the script exits inert unless VERITASTE_LASTCALL=on is set in
+# /etc/veritaste.env — armed only once a real swipe feed can suppress
+# students who already ate. Install alongside the digest units:
+#   cp deploy/veritaste-lastcall.service deploy/veritaste-lastcall.timer /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now veritaste-lastcall.timer
+
+[Unit]
+Description=Veritaste last-call reminder to declared students
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=veritaste
+Group=veritaste
+WorkingDirectory=/srv/veritaste/server
+EnvironmentFile=/etc/veritaste.env
+Environment=VERITASTE_DB=/srv/veritaste/veritaste.db
+ExecStart=/srv/veritaste/.venv/bin/python /srv/veritaste/server/send_lastcall.py

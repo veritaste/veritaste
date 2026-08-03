@@ -70,3 +70,19 @@ def condiment_ids_for(main_name: str | None, condiments: list[dict]) -> list[int
         if tag is None or tag in family:
             out.append(c["id"])
     return out
+
+
+_DEFAULTS = [
+    (re.compile(r"\bburgers?\b", re.I), {"burger_roll"}),
+    (re.compile(r"\bhot dogs?\b", re.I), {"frank_roll"}),
+]
+
+
+def default_condiment_ids_for(main_name: str | None,
+                              condiments: list[dict]) -> list[int]:
+    tags = next(
+        (t for rx, t in _DEFAULTS if rx.search(main_name or "")), None)
+    if not tags:
+        return []
+    return [c["id"] for c in condiments
+            if _cond_tag(c.get("name")) in tags]

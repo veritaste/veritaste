@@ -1,0 +1,12 @@
+[Unit]
+Description=Veritaste last-call, thirty minutes before each service end
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 America/New_York
+OnCalendar=*-*-* 13:30:00 America/New_York
+OnCalendar=*-*-* 14:00:00 America/New_York
+OnCalendar=*-*-* 19:00:00 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -51,6 +51,8 @@ const PANES = [
   { id: "where",   label: "Where can I eat?", staffLabel: "Interhouse rules",
     roles: null, overflowFor: ["staff"] },
 
+  { id: "survey", label: "Rate dishes", staffLabel: "Create survey",
+    roles: null, navFor: ["staff"], overflowFor: ["staff"] },
   { id: "availability", label: "Availability board", roles: ["staff"] },
   { id: "station", label: "Grill station", roles: ["staff"] },
   { id: "feedback", label: "Feedback", roles: ["staff"] },
@@ -63,7 +65,7 @@ function paneLabel(pane, user) {
 }
 
 const STAFF_ORDER = ["menu", "availability", "station", "feedback",
-                     "line", "forecast", "where", "account"];
+                     "line", "forecast", "survey", "where", "account"];
 
 function panesFor(user) {
   const role = user ? user.affiliation : null;
@@ -89,7 +91,10 @@ function renderNav() {
   const list = $("#navList");
   const available = panesFor(state.user);
   const role = state.user ? state.user.affiliation : null;
-  list.innerHTML = available.map(p =>
+
+  const listed = available.filter(p =>
+    !p.navFor || (role && p.navFor.includes(role)));
+  list.innerHTML = listed.map(p =>
     `<li${p.overflowFor && role && p.overflowFor.includes(role)
         ? ' data-overflow="1"' : ""}><a href="?pane=${p.id}" data-pane="${p.id}"
       ${p.id === state.pane ? 'aria-current="page"' : ""}
@@ -99,7 +104,6 @@ function renderNav() {
           aria-expanded="false" aria-label="More panes">…</button>
         <ul class="nav__menu" id="navMenu"></ul>
       </li>`;
-
   list.querySelectorAll("a").forEach(a =>
     a.addEventListener("click", e => {
       e.preventDefault();
@@ -211,6 +215,8 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function showPane(id, { push = true } = {}) {
+
+  if (id === "queue") id = "survey";
   const available = panesFor(state.user);
   if (!available.some(p => p.id === id)) id = defaultPane(state.user);
   state.pane = id;
@@ -225,13 +231,13 @@ function showPane(id, { push = true } = {}) {
   if (id === "feedback") loadFeedbackPane();
   if (id === "line") loadLinePane();
   if (id === "forecast") loadForecastPane();
+  if (id === "survey") loadQueuePane();
   if (id === "menu") startLinePoll(); else stopLinePoll();
   if (id === "grill") startGrillPoll(); else stopGrillPoll();
   if (id === "station") startStationPoll(); else stopStationPoll();
   if (push) writeUrl();
   window.scrollTo({ top: 0 });
 }
-
 function readUrl() {
   const p = new URLSearchParams(location.search);
   const num = k => (p.has(k) && p.get(k) !== "" ? Number(p.get(k)) : null);
@@ -763,6 +769,9 @@ async function loadMenu() {
   updateContextNotices(data);
 
   if (state.pane === "availability") renderBoard();
+
+  if (state.pane === "survey" && state.user?.affiliation === "staff")
+    renderQueuePickRows();
 }
 
 function updateContextNotices(data) {
@@ -786,7 +795,6 @@ function updateContextNotices(data) {
     hint = `<b>No menus for this date.</b> Nothing is published for any hall; `
          + `most close between terms. You can ${jump} to see all 13 halls' menus.`;
   }
-
   if (hint) {
     $("#hint").innerHTML = hint;
     $("#hint").style.display = "";
@@ -1042,10 +1050,10 @@ function renderGrill() {
   box.querySelectorAll("input[name=gmain]").forEach(r =>
     r.addEventListener("change", () => {
       state.grillSel.main = Number(r.value);
-      const allowed = new Set(
-        (g.mains.find(m => m.id === state.grillSel.main)?.condiments) || []);
+
       state.grillSel.conds = new Set(
-        [...state.grillSel.conds].filter(id => allowed.has(id)));
+        (g.mains.find(m => m.id === state.grillSel.main)
+          ?.default_condiments) || []);
       renderGrill();
     }));
   box.querySelectorAll("input[name=gcond]").forEach(c =>
@@ -1076,6 +1084,7 @@ function grillMsg(text) {
 }
 
 const STATION_POLL_MS = 3000;
+
 function startStationPoll() {
   loadStation();
   if (!state.stationTimer)
@@ -1318,13 +1327,22 @@ function relAgo(iso) {
 
 async function loadFeedbackPane() {
   if (!state.user || state.user.affiliation !== "staff") return;
+  const sel = $("#fbxHall");
   if (!state.fbxWired) {
     state.fbxWired = true;
     state.fbxMeal = "all";
     $("#fbxRefresh").addEventListener("click", loadFeedbackPane);
+
+    sel.innerHTML = $("#hall").innerHTML;
+    sel.addEventListener("change", () => {
+      state.hall = Number(sel.value);
+      syncControls();
+      writeUrl();
+      refreshContext();
+      loadFeedbackPane();
+    });
   }
-  const hallName = $("#hall").selectedOptions[0]?.textContent || `hall ${state.hall}`;
-  $("#fbxContext").textContent = hallName;
+  sel.value = String(state.hall);
   try {
     const data = await api(`/feedback?location=${state.hall}`);
     state.fbxNotes = data.notes;
@@ -1735,6 +1753,206 @@ function renderForecast() {
     btn.addEventListener("click", () => openSheet(Number(btn.dataset.fc))));
 }
 
+const RQ_REASON = {
+  staff:  ["The kitchen wants your take", "kitchen"],
+  new:    ["New this week", "new"],
+  recent: ["Recently served", "plain"],
+};
+
+async function loadQueuePane() {
+
+  if (!state.user) {
+    window.location.href = "/signin?then="
+      + encodeURIComponent(location.pathname + location.search);
+    return;
+  }
+  const sel = $("#rqHall");
+  if (!state.rqWired) {
+    state.rqWired = true;
+
+    sel.innerHTML = $("#hall").innerHTML;
+    sel.addEventListener("change", () => {
+      state.hall = Number(sel.value);
+      syncControls();
+      writeUrl();
+      refreshContext();
+      loadQueuePane();
+    });
+  }
+  sel.value = String(state.hall);
+  try {
+    state.rq = await api(`/rating-queue?location=${state.hall}`);
+    $("#rqMsg").hidden = true;
+  } catch (e) {
+    state.rq = null;
+    $("#rqMsg").hidden = false;
+    $("#rqMsg").textContent = e.message;
+    $("#rqList").innerHTML = "";
+    return;
+  }
+  renderQueue();
+}
+function renderQueue() {
+  const q = state.rq;
+  const box = $("#rqList");
+  const isStaff = state.user && state.user.affiliation === "staff";
+
+  $("#rqTitle").textContent = isStaff ? "Create survey" : "Rate dishes";
+  $("#rqLead").innerHTML = isStaff
+    ? "At most six dishes, each carrying its reason.<br>"
+      + "Students rate; you read the lean and push dishes in."
+    : "Rate what you tried, or say what you'd try.<br>"
+      + "Answers go to the kitchen that cooks it.";
+  renderQueueStaff();
+  if (!q.items.length) {
+    box.innerHTML = `<p class="board__empty">No dishes need ratings right
+      now. Check back after the next menu cycle.</p>`;
+    return;
+  }
+
+  const items = [...q.items.filter(i => i.your_rating == null),
+                 ...q.items.filter(i => i.your_rating != null)];
+
+  box.innerHTML = items.map(i => {
+      const [label, cls] = RQ_REASON[i.reason] || ["", "plain"];
+
+      return `<div class="rq" data-rq="${i.recipe_id}">
+        <div class="rq__hd">
+          <span class="rq__name">${esc(i.name || `Dish ${i.recipe_id}`)}</span>
+          <button class="textlink" data-rq-sheet="${i.recipe_id}">(details)</button>
+          <span class="chip ${cls}">${esc(label)}</span>
+        </div>
+        ${isStaff ? `<div class="rq__meta">${i.count
+            ? `★ ${i.average} (${i.count})` : "not yet rated"}${
+          i.intents
+            ? ` &nbsp;·&nbsp; <span class="rq__agg">would try ${i.intents.try}
+                · would skip ${i.intents.skip}</span>` : ""}
+            <button class="textlink"
+              data-rq-unpick="${i.recipe_id}">(remove from survey)</button></div>`
+        : i.your_rating != null
+
+          ? `<p class="rq__meta">You've rated this dish — that already says
+              more than a would-try.</p>`
+          : `
+        <div class="rq__int" data-rq-int="${i.recipe_id}">
+          <span>Didn't try it?</span>
+          <button data-int="try"
+            aria-pressed="${i.your_intent === "try"}">Would try</button>
+          <button data-int="skip"
+            aria-pressed="${i.your_intent === "skip"}">Would skip</button>
+        </div>`}
+        <p class="rq__msg" hidden></p>
+      </div>`;
+    }).join("");
+
+  box.querySelectorAll("[data-rq-sheet]").forEach(b =>
+    b.addEventListener("click", () => openSheet(Number(b.dataset.rqSheet))));
+  box.querySelectorAll("[data-rq-unpick]").forEach(b =>
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/rating-queue/items?location=${state.hall}`
+                  + `&recipe=${b.dataset.rqUnpick}`, { method: "DELETE" });
+      } catch (e) { rqCardMsg(b.dataset.rqUnpick, e.message); return; }
+      loadQueuePane();
+    }));
+  box.querySelectorAll("[data-rq-int] button").forEach(b =>
+    b.addEventListener("click", () => rqIntent(b)));
+}
+
+async function rqIntent(btn) {
+  const wrap = btn.closest("[data-rq-int]");
+  const recipeId = Number(wrap.dataset.rqInt);
+
+  const val = btn.getAttribute("aria-pressed") === "true"
+    ? null : btn.dataset.int;
+  try {
+    await api("/intents", { method: "POST", body: {
+      recipe_id: recipeId, location_id: state.hall, intent: val } });
+    wrap.querySelectorAll("button").forEach(x =>
+      x.setAttribute("aria-pressed", String(!!val && x.dataset.int === val)));
+    rqCardMsg(recipeId, val === null ? "Noted — answer withdrawn."
+      : val === "try" ? "Noted — the kitchen hears a would-try."
+      : "Noted — the kitchen hears a would-skip.");
+  } catch (e) {
+    rqCardMsg(recipeId, e.message);
+  }
+}
+
+function rqCardMsg(recipeId, text) {
+  const el = document.querySelector(`.rq[data-rq="${recipeId}"] .rq__msg`);
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text || "";
+}
+
+function renderQueueStaff() {
+  const boxS = $("#rqStaff");
+  if (!state.user || state.user.affiliation !== "staff") {
+    boxS.innerHTML = "";
+    return;
+  }
+  const locked = !state.user.kitchen;
+  boxS.innerHTML = `
+    ${locked ? `<p class="board__lockednote">Viewing read-only —
+        <a class="textlink" href="/staffunlock?then=${
+          encodeURIComponent("/?pane=survey")}">unlock kitchen actions</a>
+        to push dishes into the queue.</p>` : ""}
+    <h3 class="board__sub">Push a dish into the survey</h3>
+    <input id="rqFilter" type="search" autocomplete="off"
+           placeholder="Type to find a dish on the current menu…"
+           aria-label="Find dishes">
+    <div id="rqPickRows"></div>
+    <h3 class="board__sub">In the survey for students</h3>
+    <p class="fchint" style="margin:0 0 10px">The survey fills itself: your
+      picks lead, then new dishes, then recently served ones short on
+      ratings — six at most. Remove anything; add it back any time.</p>`;
+  $("#rqFilter").addEventListener("input", renderQueuePickRows);
+  renderQueuePickRows();
+}
+function renderQueuePickRows() {
+  const box = $("#rqPickRows");
+  if (!box) return;
+  const filter = ($("#rqFilter")?.value || "").trim().toLowerCase();
+
+  if (!filter) {
+    box.innerHTML = "";
+    return;
+  }
+  const queued = new Set((state.rq?.items || []).map(i => i.recipe_id));
+  const all = [...state.items.values()]
+    .filter(i => !queued.has(i.id))
+    .filter(i => (i.name || "").toLowerCase().includes(filter))
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const shown = all.slice(0, 30);
+  const dis = state.user?.kitchen ? "" : "disabled";
+  if (!shown.length) {
+    box.innerHTML = `<p class="board__empty">${state.items.size
+      ? "No dish matches."
+      : "No menu is loaded — open the Menu pane and pick the hall and meal first."}</p>`;
+    return;
+  }
+  box.innerHTML = shown.map(i => `
+    <div class="brow">
+      <span class="brow__name">${esc(i.name)}</span>
+      <button class="btn ghost small" ${dis} data-rq-pick="${i.id}">Add to survey</button>
+    </div>`).join("") + (all.length > shown.length
+    ? `<p class="board__more">…and ${all.length - shown.length} more — type to find a dish.</p>`
+    : "");
+  box.querySelectorAll("[data-rq-pick]").forEach(b =>
+    b.addEventListener("click", async () => {
+      try {
+        await api("/rating-queue/picks", { method: "POST", body: {
+          location_id: state.hall, recipe_id: Number(b.dataset.rqPick) } });
+      } catch (e) {
+        $("#rqMsg").hidden = false;
+        $("#rqMsg").textContent = e.message;
+        return;
+      }
+      $("#rqMsg").hidden = true;
+      loadQueuePane();
+    }));
+}
+
 const NUTRI = [
   ["total_fat", "Total Fat"], ["sat_fat", "Saturated Fat"], ["trans_fat", "Trans Fat"],
   ["cholesterol", "Cholesterol"], ["sodium", "Sodium"], ["total_carb", "Total Carbohydrate"],
@@ -1757,7 +1975,6 @@ async function openSheet(id, { push = true } = {}) {
   catch (e) { $("#shBody").innerHTML = `<div class="state">${esc(e.message)}</div>`; return; }
   state.sheetNote = r.your_feedback || null;
   state.fbSource = null;
-
   $("#shTitle").textContent = r.name;
   const rows = NUTRI.map(([k, label]) => {
     const v = r[k];
@@ -1767,6 +1984,8 @@ async function openSheet(id, { push = true } = {}) {
   }).join("");
 
   const signedOut = !state.user;
+
+  const survey = state.pane === "survey";
 
   const fbToday = state.date === localToday();
   const shAvail = r.availability
@@ -1783,10 +2002,12 @@ async function openSheet(id, { push = true } = {}) {
 
     <div class="chips" style="margin-top:14px">${chips({
       vegan: r.vegan, vegetarian: r.vegetarian, allergens: r.allergens,
-      spice: r.spice, consumption: r.consumption, rating: r.rating,
+      spice: r.spice, consumption: r.consumption,
+      rating: survey ? null : r.rating,
     })}
-    ${(r.allergens || []).length === 0
+    ${!survey && (r.allergens || []).length === 0
       ? `<span class="chip plain">No top-9 allergens listed</span>` : ""}</div>
+
     ${r.consumption ? `<div class="sec">
       <h4>Waste record <span class="sim">mock feed</span></h4>
       <p style="margin:0;font-size:14px;color:var(--ink-soft)">
@@ -1799,7 +2020,7 @@ async function openSheet(id, { push = true } = {}) {
       <p style="font-size:12px;color:var(--ink-mute);margin:8px 0 0">
         Right column is % Daily Value.</p></div>` : ""}
 
-    <div class="sec">
+    ${survey ? "" : `<div class="sec">
       <h4>Rate this dish</h4>
       <div class="rate" id="sheetRate">
         ${[1, 2, 3, 4, 5].map(v =>
@@ -1814,9 +2035,9 @@ async function openSheet(id, { push = true } = {}) {
             ? `You rated this ${r.your_rating}. Choosing again replaces it — one rating per dish, per hall.`
             : `Your rating goes to the kitchen that cooked it.`}
       </div>
-    </div>
+    </div>`}
 
-    ${fbToday && state.meal != null ? `<div class="sec" id="fbSec">
+    ${!survey && fbToday && state.meal != null ? `<div class="sec" id="fbSec">
       <h4>Tell the kitchen about this dish</h4>
       ${signedOut
         ? `<div class="fb__note">Notes here go to the kitchen that cooks this
@@ -1847,7 +2068,8 @@ async function openSheet(id, { push = true } = {}) {
   if (signedOut) {
     $("#sheetSignin")?.addEventListener("click", e => { e.preventDefault(); signIn(); });
   } else {
-    $("#sheetRate").querySelectorAll("button").forEach(b =>
+
+    $("#sheetRate")?.querySelectorAll("button").forEach(b =>
       b.addEventListener("click", () => submitRating(id, Number(b.dataset.v), b)));
   }
   wireFeedback(id);
@@ -1912,6 +2134,7 @@ function wireFeedback(recipeId) {
   });
   $("#fbSend").addEventListener("click", () => submitFeedback(recipeId));
 }
+
 async function submitFeedback(recipeId) {
   const msg = $("#fbMsg");
   const text = $("#fbText").value.trim();
@@ -2018,13 +2241,13 @@ function renderLineCard() {
 
   $("#lineTypical").style.display = seasonClosed ? "none" : "";
   $("#lineSim").style.display = seasonClosed ? "none" : "";
+
   if (closed) {
     $("#waitNow").textContent = "Closed";
     $("#waitSub").textContent = "Not serving at the moment";
     return;
   }
   if (!now) { $("#waitNow").textContent = "—"; $("#waitSub").textContent = ""; return; }
-
   $("#waitNow").textContent = now.wait_minutes <= 1 ? "No wait" : `~${now.wait_minutes} min`;
   $("#waitSub").textContent =
       now.busyness > .75 ? "Busiest stretch — consider 20 min later"
@@ -2036,13 +2259,13 @@ function renderLineCard() {
   $("#gauge").innerHTML = Array.from({ length: 12 },
     (_, i) => `<i class="${i < lit ? "on " + cls : ""}"></i>`).join("");
 }
+
 async function loadLine() {
   try {
     const now = await api(`/line/${state.hall}`);
     state.line = now;
     renderLineCard();
     const typical = await api(`/line/${state.hall}/typical?date=${state.date}`);
-
     if (!typical.series || !typical.series.length) {
       $("#lineTypical").style.display = "none";
       return;
@@ -2178,7 +2401,6 @@ function renderRsvp() {
   why.style.display = "none";
   act.style.display = "none";
 }
-
 function markRsvp(attending) {
   $("#yesBtn").setAttribute("aria-pressed", String(attending === true));
   $("#noBtn").setAttribute("aria-pressed", String(attending === false));
@@ -2192,7 +2414,6 @@ async function declare(attending) {
       body: { location_id: state.hall, meal: state.meal, served_on: state.date, attending },
     });
     markRsvp(attending);
-
     toast((attending ? "Thanks — you're counted in." : "Noted. The kitchen will cook less.")
           + creditSuffix(r.reward));
     if (r.reward && r.reward.granted_cents) loadWallet();
@@ -2229,7 +2450,8 @@ async function init() {
   const known = new Set(sorted.map(l => l.id));
   state.hall = known.has(u.hall) ? u.hall : Number(sorted[0].id);
   state.date = /^\d{4}-\d{2}-\d{2}$/.test(u.date || "") ? u.date : localToday();
-  state.meal = [0, 1, 2].includes(u.meal) ? u.meal : 1;
+
+  state.meal = [0, 1, 2].includes(u.meal) ? u.meal : mealByClock();
   syncControls();
   writeUrl({ replace: true });
 
@@ -2272,4 +2494,5 @@ async function init() {
 
   if (u.dish != null) openSheet(u.dish, { push: false });
 }
+
 init();

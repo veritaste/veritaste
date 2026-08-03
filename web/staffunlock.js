@@ -24,7 +24,10 @@ $("#unlockForm").addEventListener("submit", async e => {
     $("#step1").hidden = true;
     $("#stepDone").hidden = false;
     setTimeout(() => {
-      location.replace(params.get("then") || "/?pane=availability");
+
+      const then = params.get("then");
+      location.replace(then && then.startsWith("/") && !then.startsWith("//")
+        ? then : "/?pane=availability");
     }, 900);
   } catch {
     msg.textContent = "Could not reach the server.";

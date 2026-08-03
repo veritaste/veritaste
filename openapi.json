@@ -175,6 +175,34 @@
         },
         "type": "object"
       },
+      "IntentIn": {
+        "additionalProperties": false,
+        "properties": {
+          "intent": {
+            "enum": [
+              "try",
+              "skip",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location_id": {
+            "type": "integer"
+          },
+          "recipe_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "intent",
+          "location_id",
+          "recipe_id"
+        ],
+        "type": "object"
+      },
       "KitchenIn": {
         "additionalProperties": false,
         "properties": {
@@ -229,6 +257,22 @@
           "auth",
           "endpoint",
           "p256dh"
+        ],
+        "type": "object"
+      },
+      "QueuePickIn": {
+        "additionalProperties": false,
+        "properties": {
+          "location_id": {
+            "type": "integer"
+          },
+          "recipe_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "location_id",
+          "recipe_id"
         ],
         "type": "object"
       },
@@ -1166,6 +1210,44 @@
         ]
       }
     },
+    "/api/v1/intents": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntentIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Would try / would skip a dish (requires sign-in)",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
     "/api/v1/interhouse": {
       "get": {
         "parameters": [
@@ -1600,6 +1682,128 @@
         "summary": "Application server key for subscribing",
         "tags": [
           "notifications"
+        ]
+      }
+    },
+    "/api/v1/rating-queue": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "A short list of dishes worth rating at this hall",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/v1/rating-queue/items": {
+      "delete": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "location",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "recipe",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Take a dish out of the survey (staff)",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/api/v1/rating-queue/picks": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueuePickIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationError"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Push a dish into the rating queue (staff)",
+        "tags": [
+          "feedback"
         ]
       }
     },

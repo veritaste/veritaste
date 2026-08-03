@@ -1,0 +1,19 @@
+# Veritaste — staff pre-prep waste alert (oneshot; the timer drives it).
+# BUILT DARK: the script exits inert unless VERITASTE_PREPREP=on is set in
+# /etc/veritaste.env — armed only once a real bin feed replaces the mock.
+# Install alongside the digest units:
+#   cp deploy/veritaste-preprep.service deploy/veritaste-preprep.timer /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now veritaste-preprep.timer
+
+[Unit]
+Description=Veritaste staff pre-prep waste alert
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=veritaste
+Group=veritaste
+WorkingDirectory=/srv/veritaste/server
+EnvironmentFile=/etc/veritaste.env
+Environment=VERITASTE_DB=/srv/veritaste/veritaste.db
+ExecStart=/srv/veritaste/.venv/bin/python /srv/veritaste/server/send_preprep.py

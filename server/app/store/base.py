@@ -353,3 +353,69 @@ class Store(ABC):
     @abstractmethod
     def grill_orders_containing(self, location_id: int, recipe_id: int) -> list[dict]:
         ...
+
+
+    @abstractmethod
+    def set_dish_intent(self, user_id: str, recipe_id: int, location_id: int,
+                        intent: str | None) -> None:
+        ...
+
+    @abstractmethod
+    def dish_intents_for(self, user_id: str, recipe_ids: list[int],
+                         location_id: int, since: str) -> dict[int, str]:
+        ...
+
+    @abstractmethod
+    def intent_counts(self, location_id: int, recipe_ids: list[int],
+                      since: str) -> dict[int, dict]:
+        ...
+
+    @abstractmethod
+    def has_rating(self, user_id: str, recipe_id: int,
+                   location_id: int) -> bool:
+        ...
+
+    @abstractmethod
+    def user_ratings_for(self, user_id: str, recipe_ids: list[int],
+                         location_id: int) -> dict[int, int]:
+        ...
+
+    @abstractmethod
+    def queue_picks(self, location_id: int) -> list[dict]:
+        ...
+
+    @abstractmethod
+    def add_queue_pick(self, location_id: int, recipe_id: int,
+                       user_id: str) -> None:
+        ...
+
+    @abstractmethod
+    def remove_queue_pick(self, location_id: int, recipe_id: int) -> bool:
+        ...
+
+
+    @abstractmethod
+    def attendance_yes_users(self, location_id: int, served_on: str,
+                             meal: int) -> list[str]:
+        ...
+
+    @abstractmethod
+    def grill_order_users(self, location_id: int, since: str) -> set[str]:
+        ...
+
+    @abstractmethod
+    def queue_vetoes(self, location_id: int) -> set[int]:
+        ...
+
+    @abstractmethod
+    def add_queue_veto(self, location_id: int, recipe_id: int,
+                       user_id: str) -> None:
+        ...
+
+    @abstractmethod
+    def throttle_unlock(self, ip: str, window_s: int) -> int:
+        ...
+
+    @abstractmethod
+    def delete_push_sub_for_user(self, endpoint: str, user_sub: str) -> None:
+        ...

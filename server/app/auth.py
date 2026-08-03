@@ -18,7 +18,13 @@ SESSION_TTL_S = 12 * 3600
 KITCHEN_COOKIE = "veritaste_kitchen"
 KITCHEN_TTL_S = 24 * 3600
 
-_SECRET = os.environ.get("VERITASTE_SECRET", "").encode() or os.urandom(32)
+_SECRET = os.environ.get("VERITASTE_SECRET", "").encode()
+if not _SECRET:
+    raise RuntimeError(
+        "VERITASTE_SECRET is not set. Refusing to start: without one shared "
+        "key, multi-worker deployments sign sessions inconsistently. Set it "
+        "in the environment (tools/dev-server.ps1 does this for local runs)."
+    )
 
 
 @dataclass(frozen=True)

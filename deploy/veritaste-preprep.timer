@@ -1,0 +1,9 @@
+[Unit]
+Description=Veritaste pre-prep alert before breakfast prep
+
+[Timer]
+OnCalendar=*-*-* 06:30:00 America/New_York
+Persistent=false
+
+[Install]
+WantedBy=timers.target

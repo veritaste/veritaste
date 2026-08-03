@@ -149,6 +149,23 @@
   </div>
 </section>
 
+<section class="pane" id="pane-survey" hidden>
+  <div class="card">
+    <div class="card__hd"><h2 id="rqTitle">Rate dishes</h2>
+      <label class="hd-label" for="rqHall">Dining hall</label>
+      <select class="st-hall" id="rqHall"></select></div>
+    <div class="card__bd">
+      <p class="board__lead" id="rqLead">Rate what you tried, or say what
+        you'd try.<br>Answers go to the kitchen that cooks it.</p>
+      <p class="board__msg" id="rqMsg" hidden></p>
+      <div id="rqStaff"></div>
+      <div id="rqList">
+        <div class="state" style="padding:20px 0">Loading the list…</div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section class="pane" id="pane-where" hidden>
   <div class="card">
     <div class="card__hd"><h2 id="whereTitle">Where can I eat?</h2></div>
@@ -183,8 +200,9 @@
 <section class="pane" id="pane-feedback" hidden>
   <div class="card">
     <div class="card__hd"><h2>Feedback</h2>
-      <span class="board__ctx" id="fbxContext"></span>
-      <button class="textlink" id="fbxRefresh">(refresh)</button></div>
+      <button class="textlink" id="fbxRefresh">(refresh)</button>
+      <label class="hd-label" for="fbxHall">Dining hall</label>
+      <select class="st-hall" id="fbxHall"></select></div>
     <div class="card__bd">
       <div class="fbx__chips" id="fbxChips"></div>
       <p class="board__msg" id="fbxMsg" hidden></p>

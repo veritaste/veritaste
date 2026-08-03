@@ -169,7 +169,11 @@ async function approve() {
     const out = await res.json();
     $("#doneMsg").textContent = `Signed in as ${out.name}. Returning you to Veritaste…`;
     showStep(4);
-    setTimeout(() => { window.location.href = "/"; }, 1400);
+
+    const then = new URLSearchParams(location.search).get("then");
+    const dest = then && then.startsWith("/") && !then.startsWith("//")
+      ? then : "/";
+    setTimeout(() => { window.location.href = dest; }, 1400);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "Submit";

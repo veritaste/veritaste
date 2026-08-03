@@ -436,6 +436,38 @@ nav.top a[aria-current="page"]{border-bottom-color:var(--crimson); color:#fff}
   font-variant-numeric:tabular-nums; white-space:nowrap}
 .chip.new{color:var(--indigo)}
 
+.rq{border:1px solid var(--line); border-radius:var(--r); background:var(--white);
+  padding:12px 14px; margin:0 0 10px}
+.rq__hd{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.rq__name{font-family:var(--sans); font-weight:600; font-size:15.5px}
+.rq__hd .chip{margin-left:auto}
+
+@media(max-width:619px){
+  .rq__hd::after{content:""; flex-basis:100%; order:1}
+  .rq__hd .chip{order:2; margin-left:0}
+}
+.rq__meta{font-size:13px; color:var(--ink-mute); margin-top:2px}
+.rq__int{display:flex; align-items:center; gap:8px; margin-top:10px;
+  flex-wrap:wrap}
+.rq__int > span{font-size:13px; color:var(--ink-mute)}
+.rq__int button{font-family:var(--sans); font-weight:600; font-size:13px;
+  padding:7px 12px; border:1px solid var(--ink); border-radius:var(--r);
+  background:var(--white); color:var(--ink); cursor:pointer}
+.rq__int button[aria-pressed="true"]{background:var(--ink); color:#fff}
+.rq__int button:disabled{opacity:.5; cursor:not-allowed}
+
+@media(max-width:619px){
+  .rq__int > span{flex-basis:100%}
+  .rq__int button{flex:1}
+}
+.rq__msg{font-size:13px; color:var(--ink-soft); margin:8px 0 0}
+.rq__agg{font-family:var(--sans); font-size:12.5px; color:var(--ink-soft)}
+
+.chip.kitchen{color:var(--ink)}
+#rqFilter{width:100%; padding:9px 12px; border:1px solid var(--line);
+  border-radius:var(--r); font:inherit; font-size:14px; margin:0 0 6px;
+  background:#fff}
+
 .grill-status{font-size:14.5px; color:var(--ink-soft); margin:0 0 12px; max-width:56ch}
 .grill-msg{font-weight:600; color:var(--ink-soft); font-size:13.5px; margin:10px 0 0}
 .gsec{font-family:var(--sans); font-size:12px; letter-spacing:.1em;
@@ -479,7 +511,6 @@ nav.top a[aria-current="page"]{border-bottom-color:var(--crimson); color:#fff}
 .chip.plain{color:var(--ink-mute)}
 .chip em{font-weight:400; text-transform:none; letter-spacing:0; font-style:normal;
   opacity:.75}
-
 .band{display:inline-flex; align-items:center; gap:5px; font-family:var(--sans);
   font-size:11.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
   padding:4px 9px; border-radius:2px; white-space:nowrap}
@@ -535,6 +566,7 @@ nav.top a[aria-current="page"]{border-bottom-color:var(--crimson); color:#fff}
   80%{transform:translateX(2px)}
 }
 .linr__timer--reset{color:var(--saffron); animation:linr-shake .5s ease-out}
+
 .linr__bands{display:flex; gap:10px; flex-wrap:wrap}
 .linr__bands button{flex:1 1 160px; min-height:64px; padding:16px 20px;
   font-family:var(--sans); font-weight:700; font-size:18px;
@@ -550,6 +582,7 @@ nav.top a[aria-current="page"]{border-bottom-color:var(--crimson); color:#fff}
 .rate button[aria-pressed="true"]{background:var(--crimson); border-color:var(--crimson);
   color:#fff}
 .rate button:disabled{opacity:.45; cursor:not-allowed}
+
 .btn{font-family:var(--sans); font-weight:600; font-size:14px; padding:11px 18px;
   border-radius:var(--r); border:1px solid var(--ink); background:var(--ink);
   color:#fff; cursor:pointer}
@@ -589,6 +622,7 @@ nav.top a[aria-current="page"]{border-bottom-color:var(--crimson); color:#fff}
 .nutri th{font-family:var(--sans); font-weight:600; color:var(--ink-soft)}
 .nutri td{text-align:right; font-variant-numeric:tabular-nums}
 .nutri td.dv{color:var(--ink-mute); width:62px; font-size:13px}
+
 .kcal{display:flex; align-items:baseline; gap:10px; padding:12px 14px;
   background:var(--block); border:1px solid var(--line); border-radius:var(--r)}
 .kcal b{font-family:var(--sans); font-size:30px; line-height:1}
@@ -607,7 +641,6 @@ nav.top a[aria-current="page"]{border-bottom-color:var(--crimson); color:#fff}
 .stat:last-child{border-bottom:0}
 .stat span{font-size:14.5px; color:var(--ink-soft)}
 .stat b{font-family:var(--sans); font-size:17px}
-
 .note{font-size:13.5px; color:var(--ink-soft); background:#fbf3dd;
   border-left:3px solid var(--gold); padding:11px 13px;
   border-radius:0 var(--r) var(--r) 0}

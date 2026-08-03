@@ -161,8 +161,11 @@ CREATE INDEX IF NOT EXISTS idx_stock_event
 -- One grill station per hall. `state` is the staff lever (accepting,
 -- backed_up, closed); the heartbeat is stamped by every station poll and is
 -- what the dead-man's switch reads. A station that has never polled is
--- indistinguishable from a dead screen, which is exactly right: plugging the
--- tablet in IS what opens ordering.
+-- indistinguishable from a dead screen. Rows are created CLOSED: plugging
+-- the tablet in wakes the screen, and the Accepting tap — a deliberate
+-- staff act — is what opens ordering. (First-touch used to be 'accepting',
+-- which meant browsing halls on the station pane opened every hall the
+-- dropdown visited; found live 2026-08-02.)
 CREATE TABLE IF NOT EXISTS grill_station (
     location_id  INTEGER PRIMARY KEY,
     state        TEXT    NOT NULL CHECK (state IN ('accepting','paused','closed')),
@@ -201,7 +204,15 @@ CREATE INDEX IF NOT EXISTS idx_grill_user ON grill_order(user_id, status);
 -- service) wins; every accepted version also lands in the history table.
 -- signed_name is captured at write time because a demo session's subject
 -- cannot be resolved to a name after the session dies.
+-- `id` is a REAL integer primary key, not an implicit rowid: the moderation
+-- table (feedback_block.note_id) points at these rows, and SQLite may
+-- renumber bare rowids on VACUUM — which could have silently repointed a
+-- block at a different student's note, the exact misattribution class the
+-- per-note re-key exists to prevent (review finding, fixed 2026-08-02;
+-- migrate_feedback_rowid.py rebuilt existing databases preserving ids).
+-- The old composite PK survives as the UNIQUE constraint the upsert targets.
 CREATE TABLE IF NOT EXISTS menu_feedback (
+    id          INTEGER PRIMARY KEY,
     user_id     TEXT    NOT NULL,
     recipe_id   INTEGER NOT NULL,
     location_id INTEGER NOT NULL,
@@ -214,7 +225,7 @@ CREATE TABLE IF NOT EXISTS menu_feedback (
     edited      INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL,
-    PRIMARY KEY (user_id, recipe_id, location_id, served_on, meal)
+    UNIQUE (user_id, recipe_id, location_id, served_on, meal)
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_hall
     ON menu_feedback(location_id, served_on);
@@ -264,6 +275,66 @@ CREATE TABLE IF NOT EXISTS line_report (
 );
 CREATE INDEX IF NOT EXISTS idx_line_report_loc
     ON line_report(location_id, id);
+
+-- What a student would do with a dish they saw but did not eat: Would try /
+-- Would skip. One ACTIVE intent per student per dish per hall; the latest tap
+-- replaces it and the history table below keeps every change. A star rating
+-- outranks an intent — you cannot intend a dish you have rated, and the
+-- aggregates skip students who have since rated. Freshness is a read-side
+-- filter, never a deletion: old intents stop counting because demand is a
+-- question about now, but the record of them stays.
+CREATE TABLE IF NOT EXISTS dish_intent (
+    user_id     TEXT    NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    intent      TEXT    NOT NULL CHECK (intent IN ('try','skip')),
+    updated_at  TEXT    NOT NULL,
+    PRIMARY KEY (user_id, recipe_id, location_id)
+);
+CREATE INDEX IF NOT EXISTS idx_dish_intent
+    ON dish_intent(location_id, recipe_id, updated_at);
+CREATE TABLE IF NOT EXISTS dish_intent_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT    NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    intent      TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL
+);
+
+-- Staff-pushed rating-queue picks: "The kitchen wants your take." One active
+-- pick per dish per hall, standing until staff take it back out. `picked_by`
+-- is the audit trail and never reaches students (chef's-tool rule).
+CREATE TABLE IF NOT EXISTS queue_pick (
+    location_id INTEGER NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    picked_by   TEXT    NOT NULL,
+    picked_at   TEXT    NOT NULL,
+    PRIMARY KEY (location_id, recipe_id)
+);
+
+-- Kitchen-unlock attempts, one row per client address, shared by every
+-- worker. Replaces a per-process global slot that both doubled the intended
+-- rate and let one hostile client lock every legitimate staff member out —
+-- and would have serialized a demo audience behind a single window. Rows
+-- past the throttle window are pruned on every attempt, so this table
+-- holds at most a few seconds of history and never accumulates addresses.
+CREATE TABLE IF NOT EXISTS unlock_attempt (
+    ip      TEXT PRIMARY KEY,
+    last_at REAL NOT NULL
+);
+
+-- Staff removals from the survey: a veto keeps an auto-qualified dish out of
+-- a hall's survey until staff add it back — a pick clears its veto. Without
+-- this, removing a dish the system chose just re-chose it on the next load:
+-- mechanically honest, humanly baffling (ruled 2026-08-02).
+CREATE TABLE IF NOT EXISTS queue_veto (
+    location_id INTEGER NOT NULL,
+    recipe_id   INTEGER NOT NULL,
+    vetoed_by   TEXT    NOT NULL,
+    vetoed_at   TEXT    NOT NULL,
+    PRIMARY KEY (location_id, recipe_id)
+);
 """
 
 
@@ -635,6 +706,15 @@ class SqliteStore(Store):
             )
             self._conn.commit()
 
+    def delete_push_sub_for_user(self, endpoint: str, user_sub: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM push_subscription WHERE endpoint = ? "
+                "AND user_sub = ?",
+                (endpoint, user_sub),
+            )
+            self._conn.commit()
+
     def push_subs(
         self, user_id: str | None = None, affiliation: str | None = None
     ) -> list[PushSub]:
@@ -858,7 +938,7 @@ class SqliteStore(Store):
                               served_on: str) -> list[dict]:
         rows = self._conn.execute(
             """
-            SELECT f.rowid AS id, f.recipe_id, f.meal, f.text,
+            SELECT f.id, f.recipe_id, f.meal, f.text,
                    CASE WHEN f.signed = 1 THEN f.signed_name END AS signed_name,
                    f.source, f.edited, f.created_at, f.updated_at,
                    CASE WHEN b.note_id IS NOT NULL
@@ -869,7 +949,7 @@ class SqliteStore(Store):
                        AND r.location_id = f.location_id) AS rating_score
             FROM menu_feedback f
             LEFT JOIN feedback_block b
-                   ON b.note_id = f.rowid AND b.active = 1
+                   ON b.note_id = f.id AND b.active = 1
             WHERE f.location_id = ? AND f.served_on = ?
             ORDER BY f.updated_at DESC
             """,
@@ -879,7 +959,7 @@ class SqliteStore(Store):
 
     def feedback_author(self, note_id: int) -> str | None:
         row = self._conn.execute(
-            "SELECT user_id FROM menu_feedback WHERE rowid = ?", (note_id,),
+            "SELECT user_id FROM menu_feedback WHERE id = ?", (note_id,),
         ).fetchone()
         return row["user_id"] if row else None
 
@@ -976,6 +1056,189 @@ class SqliteStore(Store):
             (location_id, since, limit),
         ).fetchall()]
 
+
+    def throttle_unlock(self, ip: str, window_s: int) -> int:
+        import time as _time
+        now = _time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_at FROM unlock_attempt WHERE ip = ?", (ip,),
+            ).fetchone()
+            if row is not None:
+                wait = window_s - (now - row["last_at"])
+                if wait > 0:
+                    self._conn.commit()
+                    return int(wait) + 1
+            self._conn.execute(
+                "INSERT INTO unlock_attempt (ip, last_at) VALUES (?, ?) "
+                "ON CONFLICT(ip) DO UPDATE SET last_at = excluded.last_at",
+                (ip, now))
+            self._conn.execute(
+                "DELETE FROM unlock_attempt WHERE last_at < ?",
+                (now - window_s,))
+            self._conn.commit()
+        return 0
+
+
+    def attendance_yes_users(self, location_id: int, served_on: str,
+                             meal: int) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT user_id FROM attendance_intent WHERE location_id = ? "
+            "AND served_on = ? AND meal = ? AND attending = 1",
+            (location_id, served_on, meal),
+        ).fetchall()
+        return [r["user_id"] for r in rows]
+
+    def grill_order_users(self, location_id: int, since: str) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT user_id FROM grill_order WHERE location_id = ? "
+            "AND placed_at >= ? AND status != 'cancelled'",
+            (location_id, since),
+        ).fetchall()
+        return {r["user_id"] for r in rows}
+
+
+    def set_dish_intent(self, user_id: str, recipe_id: int, location_id: int,
+                        intent: str | None) -> None:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            if intent is None:
+                self._conn.execute(
+                    "DELETE FROM dish_intent WHERE user_id = ? AND "
+                    "recipe_id = ? AND location_id = ?",
+                    (user_id, recipe_id, location_id))
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO dish_intent
+                        (user_id, recipe_id, location_id, intent, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, recipe_id, location_id) DO UPDATE SET
+                        intent     = excluded.intent,
+                        updated_at = excluded.updated_at
+                    """,
+                    (user_id, recipe_id, location_id, intent, now))
+            self._conn.execute(
+                "INSERT INTO dish_intent_history "
+                "(user_id, recipe_id, location_id, intent, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, recipe_id, location_id, intent or "cleared", now))
+            self._conn.commit()
+
+    def dish_intents_for(self, user_id: str, recipe_ids: list[int],
+                         location_id: int, since: str) -> dict[int, str]:
+        if not recipe_ids:
+            return {}
+        rows = self._conn.execute(
+            f"SELECT recipe_id, intent FROM dish_intent "
+            f"WHERE user_id = ? AND location_id = ? AND updated_at >= ? "
+            f"AND recipe_id IN ({_placeholders(len(recipe_ids))})",
+            (user_id, location_id, since, *recipe_ids),
+        ).fetchall()
+        return {r["recipe_id"]: r["intent"] for r in rows}
+
+    def intent_counts(self, location_id: int, recipe_ids: list[int],
+                      since: str) -> dict[int, dict]:
+        if not recipe_ids:
+            return {}
+        rows = self._conn.execute(
+            f"""
+            SELECT i.recipe_id, i.intent, COUNT(*) AS n
+            FROM dish_intent i
+            WHERE i.location_id = ? AND i.updated_at >= ?
+              AND i.recipe_id IN ({_placeholders(len(recipe_ids))})
+              AND NOT EXISTS (
+                  SELECT 1 FROM rating r
+                  WHERE r.user_id = i.user_id
+                    AND r.recipe_id = i.recipe_id
+                    AND r.location_id = i.location_id)
+            GROUP BY i.recipe_id, i.intent
+            """,
+            (location_id, since, *recipe_ids),
+        ).fetchall()
+        out: dict[int, dict] = {}
+        for r in rows:
+            out.setdefault(r["recipe_id"], {"try": 0, "skip": 0})[r["intent"]] = r["n"]
+        return out
+
+    def has_rating(self, user_id: str, recipe_id: int,
+                   location_id: int) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM rating WHERE user_id = ? AND recipe_id = ? AND "
+            "location_id = ? LIMIT 1",
+            (user_id, recipe_id, location_id),
+        ).fetchone() is not None
+
+    def user_ratings_for(self, user_id: str, recipe_ids: list[int],
+                         location_id: int) -> dict[int, int]:
+        if not recipe_ids:
+            return {}
+        rows = self._conn.execute(
+            f"SELECT recipe_id, score FROM rating WHERE user_id = ? AND "
+            f"location_id = ? AND recipe_id IN "
+            f"({_placeholders(len(recipe_ids))})",
+            (user_id, location_id, *recipe_ids),
+        ).fetchall()
+        return {r["recipe_id"]: r["score"] for r in rows}
+
+    def queue_picks(self, location_id: int) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT recipe_id, picked_at FROM queue_pick "
+            "WHERE location_id = ? ORDER BY picked_at DESC, recipe_id",
+            (location_id,),
+        ).fetchall()]
+
+    def add_queue_pick(self, location_id: int, recipe_id: int,
+                       user_id: str) -> None:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO queue_pick
+                    (location_id, recipe_id, picked_by, picked_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(location_id, recipe_id) DO UPDATE SET
+                    picked_by = excluded.picked_by,
+                    picked_at = excluded.picked_at
+                """,
+                (location_id, recipe_id, user_id, now))
+            self._conn.execute(
+                "DELETE FROM queue_veto WHERE location_id = ? AND "
+                "recipe_id = ?",
+                (location_id, recipe_id))
+            self._conn.commit()
+
+    def remove_queue_pick(self, location_id: int, recipe_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM queue_pick WHERE location_id = ? AND recipe_id = ?",
+                (location_id, recipe_id))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def queue_vetoes(self, location_id: int) -> set[int]:
+        rows = self._conn.execute(
+            "SELECT recipe_id FROM queue_veto WHERE location_id = ?",
+            (location_id,),
+        ).fetchall()
+        return {r["recipe_id"] for r in rows}
+
+    def add_queue_veto(self, location_id: int, recipe_id: int,
+                       user_id: str) -> None:
+        now = datetime.utcnow().isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO queue_veto
+                    (location_id, recipe_id, vetoed_by, vetoed_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(location_id, recipe_id) DO UPDATE SET
+                    vetoed_by = excluded.vetoed_by,
+                    vetoed_at = excluded.vetoed_at
+                """,
+                (location_id, recipe_id, user_id, now))
+            self._conn.commit()
+
     def feedback_blocked(self, user_id: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM feedback_block WHERE user_id = ? AND active = 1 "
@@ -1025,7 +1288,7 @@ class SqliteStore(Store):
             self._conn.execute(
                 "INSERT OR IGNORE INTO grill_station "
                 "(location_id, state, app_cap, heartbeat_at, updated_at) "
-                "VALUES (?, 'accepting', ?, NULL, ?)",
+                "VALUES (?, 'closed', ?, NULL, ?)",
                 (location_id, default_cap, now),
             )
             self._conn.commit()
