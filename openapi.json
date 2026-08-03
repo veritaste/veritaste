@@ -1717,7 +1717,7 @@
             "description": "Validation error"
           }
         },
-        "summary": "A short list of dishes worth rating at this hall",
+        "summary": "This hall's survey \u2014 staff-composed dishes worth a minute",
         "tags": [
           "feedback"
         ]
@@ -1801,7 +1801,7 @@
             "description": "Validation error"
           }
         },
-        "summary": "Push a dish into the rating queue (staff)",
+        "summary": "Add a dish to this hall's survey (staff)",
         "tags": [
           "feedback"
         ]

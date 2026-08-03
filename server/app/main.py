@@ -48,6 +48,7 @@ QUEUE_NEW_DAYS = 14
 QUEUE_SERVED_DAYS = 7
 QUEUE_MIN_RATINGS = 5
 INTENT_FRESH_DAYS = 14
+QUEUE_RECS = 8
 
 DISCLAIMER = (
     "This is not affiliated with or endorsed by Harvard University or HUDS."
@@ -886,63 +887,73 @@ def _register(app: APIFlask) -> None:
     @app.get(f"{API}/rating-queue")
     @app.input(QueueQuery, location="query")
     @app.doc(tags=["feedback"],
-             summary="A short list of dishes worth rating at this hall")
+             summary="This hall's survey — staff-composed dishes worth a minute")
     def rating_queue(query_data):
         svc = _svc()
         location = query_data["location"]
         today = dt.date.fromisoformat(_today())
+
+        picks = svc.store.queue_picks(location)[:QUEUE_CAP]
+        pick_ids = [p["recipe_id"] for p in picks]
+        picked = set(pick_ids)
+
+        user = current_user()
+        staff = bool(user and user.affiliation == "staff")
+
         first_seen, last_seen, recent, new_ids = _queue_candidates(
             svc, location, today)
-
-        picks = svc.store.queue_picks(location)
-        vetoes = svc.store.queue_vetoes(location)
-        maybe = sorted({*(p["recipe_id"] for p in picks), *new_ids, *recent})
-        summaries = svc.store.rating_summary(maybe[:150], location,
-                                             RATING_RECENT_DAYS)
+        new_set = set(new_ids)
+        all_ids = sorted({*pick_ids, *new_set, *recent})
+        summaries = (svc.store.rating_summary(all_ids[:150], location,
+                                              RATING_RECENT_DAYS)
+                     if all_ids else {})
         recent_count = lambda rid: getattr(
             summaries.get(rid), "recent_count", 0) or 0
 
-        ordered: list[tuple[int, str]] = []
-        seen: set[int] = set()
-        for p in picks:
-            if p["recipe_id"] not in seen:
-                ordered.append((p["recipe_id"], "staff"))
-                seen.add(p["recipe_id"])
-        for rid in sorted(new_ids, key=lambda r: first_seen[r], reverse=True):
-            if rid not in seen and rid not in vetoes:
-                ordered.append((rid, "new"))
-                seen.add(rid)
-        underrated = [rid for rid in recent
-                      if rid not in vetoes
-                      and recent_count(rid) < QUEUE_MIN_RATINGS]
-        underrated.sort(key=lambda r: last_seen.get(r, ""), reverse=True)
-        underrated.sort(key=recent_count)
-        for rid in underrated:
-            if rid not in seen:
-                ordered.append((rid, "recent"))
-                seen.add(rid)
-        ordered = ordered[:QUEUE_CAP]
+        def reason_for(rid: int) -> str:
+            if rid in new_set:
+                return "new"
+            if rid in recent and recent_count(rid) < QUEUE_MIN_RATINGS:
+                return "recent"
+            return "staff"
 
-        ids = [rid for rid, _ in ordered]
-        names = {rid: (rec or {}).get("name")
-                 for rid, rec in svc.dining.recipes(ids).items()}
+        rec_pairs: list[tuple[int, str]] = []
+        if staff:
+            for rid in sorted(new_ids, key=lambda r: first_seen[r],
+                              reverse=True):
+                if rid not in picked:
+                    rec_pairs.append((rid, "new"))
+            under = [rid for rid in recent
+                     if rid not in picked
+                     and rid not in new_set
+                     and recent_count(rid) < QUEUE_MIN_RATINGS]
+            under.sort(key=lambda r: last_seen.get(r, ""), reverse=True)
+            under.sort(key=recent_count)
+            rec_pairs.extend((rid, "recent") for rid in under)
+            rec_pairs = rec_pairs[:QUEUE_RECS]
 
-        user = current_user()
+        named = pick_ids + [rid for rid, _ in rec_pairs]
+        names = ({rid: (rec or {}).get("name")
+                  for rid, rec in svc.dining.recipes(named).items()}
+                 if named else {})
+
         fresh = (dt.datetime.utcnow()
                  - dt.timedelta(days=INTENT_FRESH_DAYS)).isoformat()
-        your_ratings = (svc.store.user_ratings_for(user.sub, ids, location)
-                        if user else {})
-        your_intents = (svc.store.dish_intents_for(user.sub, ids, location,
-                                                   fresh) if user else {})
-        staff = bool(user and user.affiliation == "staff")
-        counts = (svc.store.intent_counts(location, ids, fresh)
-                  if staff else {})
+        your_ratings = (svc.store.user_ratings_for(user.sub, pick_ids,
+                                                   location)
+                        if user and pick_ids else {})
+        your_intents = (svc.store.dish_intents_for(user.sub, pick_ids,
+                                                   location, fresh)
+                        if user and pick_ids else {})
+        counts = (svc.store.intent_counts(location, pick_ids, fresh)
+                  if staff and pick_ids else {})
 
         items = []
-        for rid, reason in ordered:
+        for rid in pick_ids:
             s = summaries.get(rid)
             it = {
-                "recipe_id": rid, "name": names.get(rid), "reason": reason,
+                "recipe_id": rid, "name": names.get(rid),
+                "reason": reason_for(rid),
                 "average": getattr(s, "average", None),
                 "count": getattr(s, "count", 0) or 0,
                 "your_rating": your_ratings.get(rid),
@@ -951,8 +962,16 @@ def _register(app: APIFlask) -> None:
             if staff:
                 it["intents"] = counts.get(rid, {"try": 0, "skip": 0})
             items.append(it)
-        return {"location": location, "date": today.isoformat(),
-                "cap": QUEUE_CAP, "items": items}
+
+        out = {"location": location, "date": today.isoformat(),
+               "cap": QUEUE_CAP, "items": items}
+        if staff:
+            out["recommendations"] = [{
+                "recipe_id": rid, "name": names.get(rid), "reason": reason,
+                "average": getattr(summaries.get(rid), "average", None),
+                "count": getattr(summaries.get(rid), "count", 0) or 0,
+            } for rid, reason in rec_pairs]
+        return out
 
     @app.post(f"{API}/intents")
     @login_required
@@ -976,12 +995,16 @@ def _register(app: APIFlask) -> None:
     @staff_required
     @app.input(QueuePickIn)
     @app.doc(tags=["feedback"],
-             summary="Push a dish into the rating queue (staff)")
+             summary="Add a dish to this hall's survey (staff)")
     def add_queue_pick(json_data):
-        _svc().store.add_queue_pick(
-            json_data["location_id"], json_data["recipe_id"],
-            current_user().sub)
-        return {"ok": True, "recipe_id": json_data["recipe_id"]}
+        svc = _svc()
+        loc, rid = json_data["location_id"], json_data["recipe_id"]
+        existing = {p["recipe_id"] for p in svc.store.queue_picks(loc)}
+        if rid not in existing and len(existing) >= QUEUE_CAP:
+            abort(400, f"The survey is full — {QUEUE_CAP} dishes at most. "
+                       "Remove one first.")
+        svc.store.add_queue_pick(loc, rid, current_user().sub)
+        return {"ok": True, "recipe_id": rid}
 
     @app.delete(f"{API}/rating-queue/items")
     @staff_required
@@ -989,11 +1012,9 @@ def _register(app: APIFlask) -> None:
     @app.doc(tags=["feedback"],
              summary="Take a dish out of the survey (staff)")
     def remove_queue_item(query_data):
-        svc = _svc()
-        loc, rid = query_data["location"], query_data["recipe"]
-        removed = svc.store.remove_queue_pick(loc, rid)
-        svc.store.add_queue_veto(loc, rid, current_user().sub)
-        return {"ok": True, "removed_pick": removed, "vetoed": True}
+        removed = _svc().store.remove_queue_pick(
+            query_data["location"], query_data["recipe"])
+        return {"ok": True, "removed_pick": removed}
 
     @app.get(f"{API}/houses")
     @app.doc(tags=["reference"], summary="Houses and the servery each uses")

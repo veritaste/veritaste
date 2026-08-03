@@ -1799,20 +1799,21 @@ function renderQueue() {
 
   $("#rqTitle").textContent = isStaff ? "Create survey" : "Rate dishes";
   $("#rqLead").innerHTML = isStaff
-    ? "At most six dishes, each carrying its reason.<br>"
-      + "Students rate; you read the lean and push dishes in."
+    ? "You compose it: add from the recommendations, or search the menu.<br>"
+      + "Students see only what you add — six dishes at most."
     : "Rate what you tried, or say what you'd try.<br>"
       + "Answers go to the kitchen that cooks it.";
   renderQueueStaff();
   if (!q.items.length) {
-    box.innerHTML = `<p class="board__empty">No dishes need ratings right
-      now. Check back after the next menu cycle.</p>`;
+
+    box.innerHTML = `<p class="board__empty">${isStaff
+      ? "Nothing in the survey yet — add dishes above."
+      : "There's no survey for this hall right now."}</p>`;
     return;
   }
 
   const items = [...q.items.filter(i => i.your_rating == null),
                  ...q.items.filter(i => i.your_rating != null)];
-
   box.innerHTML = items.map(i => {
       const [label, cls] = RQ_REASON[i.reason] || ["", "plain"];
 
@@ -1892,23 +1893,52 @@ function renderQueueStaff() {
     return;
   }
   const locked = !state.user.kitchen;
+  const dis = locked ? "disabled" : "";
+  const recs = state.rq?.recommendations || [];
   boxS.innerHTML = `
     ${locked ? `<p class="board__lockednote">Viewing read-only —
         <a class="textlink" href="/staffunlock?then=${
           encodeURIComponent("/?pane=survey")}">unlock kitchen actions</a>
-        to push dishes into the queue.</p>` : ""}
-    <h3 class="board__sub">Push a dish into the survey</h3>
+        to compose the survey.</p>` : ""}
+    <h3 class="board__sub">Recommended for this survey</h3>
+    <div id="rqRecs">${recs.length ? recs.map(r => {
+      const [label, cls] = RQ_REASON[r.reason] || ["", "plain"];
+      return `<div class="brow">
+        <span class="brow__name">${esc(r.name || `Dish ${r.recipe_id}`)}</span>
+        <span class="chip ${cls}">${esc(label)}</span>
+        <button class="btn ghost small" ${dis}
+                data-rq-pick="${r.recipe_id}">Add</button>
+      </div>`;
+    }).join("")
+      : `<p class="board__empty">Nothing to recommend right now.</p>`}</div>
+    <h3 class="board__sub">Or search the menu</h3>
     <input id="rqFilter" type="search" autocomplete="off"
            placeholder="Type to find a dish on the current menu…"
            aria-label="Find dishes">
     <div id="rqPickRows"></div>
     <h3 class="board__sub">In the survey for students</h3>
-    <p class="fchint" style="margin:0 0 10px">The survey fills itself: your
-      picks lead, then new dishes, then recently served ones short on
-      ratings — six at most. Remove anything; add it back any time.</p>`;
+    <p class="fchint" style="margin:0 0 10px">Removing a dish returns it to
+      the recommendations. No survey composed means nothing goes out for
+      this hall — students are only ever invited to a survey that exists.</p>`;
   $("#rqFilter").addEventListener("input", renderQueuePickRows);
+  $("#rqRecs").querySelectorAll("[data-rq-pick]").forEach(b =>
+    b.addEventListener("click", () => rqAddPick(b.dataset.rqPick)));
   renderQueuePickRows();
 }
+
+async function rqAddPick(id) {
+  try {
+    await api("/rating-queue/picks", { method: "POST", body: {
+      location_id: state.hall, recipe_id: Number(id) } });
+  } catch (e) {
+    $("#rqMsg").hidden = false;
+    $("#rqMsg").textContent = e.message;
+    return;
+  }
+  $("#rqMsg").hidden = true;
+  loadQueuePane();
+}
+
 function renderQueuePickRows() {
   const box = $("#rqPickRows");
   if (!box) return;
@@ -1939,18 +1969,7 @@ function renderQueuePickRows() {
     ? `<p class="board__more">…and ${all.length - shown.length} more — type to find a dish.</p>`
     : "");
   box.querySelectorAll("[data-rq-pick]").forEach(b =>
-    b.addEventListener("click", async () => {
-      try {
-        await api("/rating-queue/picks", { method: "POST", body: {
-          location_id: state.hall, recipe_id: Number(b.dataset.rqPick) } });
-      } catch (e) {
-        $("#rqMsg").hidden = false;
-        $("#rqMsg").textContent = e.message;
-        return;
-      }
-      $("#rqMsg").hidden = true;
-      loadQueuePane();
-    }));
+    b.addEventListener("click", () => rqAddPick(b.dataset.rqPick)));
 }
 
 const NUTRI = [
@@ -1975,6 +1994,7 @@ async function openSheet(id, { push = true } = {}) {
   catch (e) { $("#shBody").innerHTML = `<div class="state">${esc(e.message)}</div>`; return; }
   state.sheetNote = r.your_feedback || null;
   state.fbSource = null;
+
   $("#shTitle").textContent = r.name;
   const rows = NUTRI.map(([k, label]) => {
     const v = r[k];
@@ -2014,7 +2034,6 @@ async function openSheet(id, { push = true } = {}) {
         ${Math.round(r.consumption.rate * 100)}% of what was prepared got eaten,
         across ${r.consumption.observations} measured service${r.consumption.observations === 1 ? "" : "s"}.
       </p></div>` : ""}
-
     ${rows ? `<div class="sec"><h4>Nutrition</h4>
       <table class="nutri">${rows}</table>
       <p style="font-size:12px;color:var(--ink-mute);margin:8px 0 0">
@@ -2248,6 +2267,7 @@ function renderLineCard() {
     return;
   }
   if (!now) { $("#waitNow").textContent = "—"; $("#waitSub").textContent = ""; return; }
+
   $("#waitNow").textContent = now.wait_minutes <= 1 ? "No wait" : `~${now.wait_minutes} min`;
   $("#waitSub").textContent =
       now.busyness > .75 ? "Busiest stretch — consider 20 min later"
@@ -2266,6 +2286,7 @@ async function loadLine() {
     state.line = now;
     renderLineCard();
     const typical = await api(`/line/${state.hall}/typical?date=${state.date}`);
+
     if (!typical.series || !typical.series.length) {
       $("#lineTypical").style.display = "none";
       return;
@@ -2331,7 +2352,6 @@ async function loadInterhouse() {
     box.innerHTML = `<div class="state" style="padding:20px 0">${esc(e.message)}</div>`;
     return;
   }
-
   const labels = isStaff ? ACCESS_LABEL_STAFF : ACCESS_LABEL;
   const rows = data.halls.map(h => `
     <div class="ih">
@@ -2401,11 +2421,11 @@ function renderRsvp() {
   why.style.display = "none";
   act.style.display = "none";
 }
+
 function markRsvp(attending) {
   $("#yesBtn").setAttribute("aria-pressed", String(attending === true));
   $("#noBtn").setAttribute("aria-pressed", String(attending === false));
 }
-
 async function declare(attending) {
   if (!state.user) { signIn(); return; }
   try {
@@ -2414,6 +2434,7 @@ async function declare(attending) {
       body: { location_id: state.hall, meal: state.meal, served_on: state.date, attending },
     });
     markRsvp(attending);
+
     toast((attending ? "Thanks — you're counted in." : "Noted. The kitchen will cook less.")
           + creditSuffix(r.reward));
     if (r.reward && r.reward.granted_cents) loadWallet();
@@ -2463,7 +2484,6 @@ async function init() {
     state.date = e.target.value;
     writeUrl(); refreshContext();
   });
-
   $("#mealSeg").addEventListener("click", e => {
     const b = e.target.closest("button[data-meal]");
     if (!b) return;
